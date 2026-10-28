@@ -25,6 +25,18 @@ public class AppDbContext(DbContextOptions<AppDbContext> options, IPublisher pub
             b.HasIndex(s => new { s.Network, s.CreatedAt })
                 .IsDescending(false, true);
 
+            // SQLite can't ORDER BY / compare DateTimeOffset in SQL (it's stored as
+            // TEXT), which the CreatedAt-DESC history query needs. On SQLite only,
+            // store CreatedAt as UTC ticks (BIGINT) so it sorts natively and uses the
+            // index above; SQL Server keeps its native datetimeoffset. CreatedAt is
+            // always UTC (TimeProvider.GetUtcNow), so the conversion loses nothing.
+            if (Database.IsSqlite())
+            {
+                b.Property(s => s.CreatedAt).HasConversion(
+                    d => d.UtcDateTime.Ticks,
+                    t => new DateTimeOffset(t, TimeSpan.Zero));
+            }
+
             b.OwnsOne(s => s.FeeRates, fr =>
             {
                 fr.Property(f => f.High).HasColumnName("HighFeePerKb");

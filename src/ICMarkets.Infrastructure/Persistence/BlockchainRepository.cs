@@ -16,15 +16,18 @@ public class BlockchainRepository(AppDbContext db) : IBlockchainRepository
         return Task.CompletedTask;
     }
 
-    // shortcut: order by Id rather than CreatedAt (a DateTimeOffset) - the Sqlite
-    // provider cannot translate ORDER BY over DateTimeOffset, and Id is monotonically
-    // increasing with insertion order anyway, so this is equivalent and provider-agnostic.
+    // Order by CreatedAt DESC as the task requires, with Id DESC as a deterministic
+    // tiebreaker when two rows share a timestamp. CreatedAt is always UTC
+    // (TimeProvider.GetUtcNow), so it sorts correctly on both SQL Server and Sqlite.
+    // Served by the (Network, CreatedAt DESC) index; SQL Server appends the clustered
+    // PK (Id) to the nonclustered index, so the Id tiebreaker is covered too.
     // AsNoTracking: these are read-only query paths, no change tracking needed.
     public async Task<List<BlockchainSnapshot>> GetHistoryAsync(Network network, int take, int skip, CancellationToken ct) =>
         await db.Snapshots
             .AsNoTracking()
             .Where(s => s.Network == network)
-            .OrderByDescending(s => s.Id)
+            .OrderByDescending(s => s.CreatedAt)
+            .ThenByDescending(s => s.Id)
             .Skip(skip)
             .Take(take)
             .ToListAsync(ct);
@@ -33,6 +36,7 @@ public class BlockchainRepository(AppDbContext db) : IBlockchainRepository
         await db.Snapshots
             .AsNoTracking()
             .Where(s => s.Network == network)
-            .OrderByDescending(s => s.Id)
+            .OrderByDescending(s => s.CreatedAt)
+            .ThenByDescending(s => s.Id)
             .FirstOrDefaultAsync(ct);
 }

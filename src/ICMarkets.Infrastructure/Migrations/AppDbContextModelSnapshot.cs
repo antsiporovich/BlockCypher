@@ -81,7 +81,7 @@ namespace ICMarkets.Infrastructure.Migrations
                     b.HasIndex("Network", "CreatedAt")
                         .IsDescending(false, true);
 
-                    b.ToTable("Snapshots");
+                    b.ToTable("Snapshots", (string)null);
                 });
 
             modelBuilder.Entity("ICMarkets.Domain.Entities.BlockchainSnapshot", b =>
@@ -105,7 +105,7 @@ namespace ICMarkets.Infrastructure.Migrations
 
                             b1.HasKey("BlockchainSnapshotId");
 
-                            b1.ToTable("Snapshots");
+                            b1.ToTable("Snapshots", (string)null);
 
                             b1.WithOwner()
                                 .HasForeignKey("BlockchainSnapshotId");
@@ -146,7 +146,7 @@ namespace ICMarkets.Infrastructure.Migrations
 
                             b1.HasKey("BlockchainSnapshotId");
 
-                            b1.ToTable("Snapshots");
+                            b1.ToTable("Snapshots", (string)null);
 
                             b1.WithOwner()
                                 .HasForeignKey("BlockchainSnapshotId");
