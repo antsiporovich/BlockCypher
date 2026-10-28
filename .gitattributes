@@ -1,0 +1,21 @@
+# Normalise line endings: LF in the repo, native in the working tree.
+* text=auto
+
+*.cs        text diff=csharp
+*.csproj    text
+*.sln       text eol=crlf
+*.props     text
+*.targets   text
+*.json      text
+*.yml       text
+*.yaml      text
+*.md        text
+*.sh        text eol=lf
+Dockerfile  text eol=lf
+*.ps1       text eol=crlf
+
+# Binary
+*.png binary
+*.jpg binary
+*.pdf binary
+*.dll binary

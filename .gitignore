@@ -1,0 +1,41 @@
+## .NET
+bin/
+obj/
+[Dd]ebug/
+[Rr]elease/
+x64/
+x86/
+[Bb]uild[Ll]og.*
+*.user
+*.suo
+*.userprefs
+*.cache
+*.pdb
+project.lock.json
+artifacts/
+TestResults/
+coverage*.json
+coverage*.xml
+coverage*.info
+BenchmarkDotNet.Artifacts/
+
+## Rider / Visual Studio / VS Code
+.vs/
+.idea/
+*.sln.docstates
+.vscode/*
+!.vscode/extensions.json
+
+## Local data & secrets — never commit
+*.db
+*.db-shm
+*.db-wal
+appsettings.*.local.json
+secrets.json
+.env
+*.pfx
+
+## OS noise
+.DS_Store
+Thumbs.db
+desktop.ini
