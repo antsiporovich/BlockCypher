@@ -11,8 +11,16 @@ public static class DependencyInjection
 {
     public static IServiceCollection AddInfrastructure(this IServiceCollection services, IConfiguration config)
     {
+        var provider = config["Database:Provider"] ?? "SqlServer";
+        var connectionString = config.GetConnectionString("Default");
+
         services.AddDbContext<AppDbContext>(opt =>
-            opt.UseSqlServer(config.GetConnectionString("Default")));
+        {
+            if (provider == "Sqlite")
+                opt.UseSqlite(connectionString);
+            else
+                opt.UseSqlServer(connectionString, sql => sql.EnableRetryOnFailure());
+        });
 
         services.AddScoped<IBlockchainRepository, BlockchainRepository>();
 
