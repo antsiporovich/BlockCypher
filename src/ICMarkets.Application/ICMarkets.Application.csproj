@@ -4,4 +4,12 @@
     <ProjectReference Include="..\ICMarkets.Domain\ICMarkets.Domain.csproj" />
   </ItemGroup>
 
+  <ItemGroup>
+    <PackageReference Include="FluentValidation" />
+    <PackageReference Include="FluentValidation.DependencyInjectionExtensions" />
+    <PackageReference Include="MediatR" />
+    <PackageReference Include="Microsoft.Extensions.Logging.Abstractions" />
+    <PackageReference Include="Riok.Mapperly" />
+  </ItemGroup>
+
 </Project>

@@ -1,3 +1,5 @@
+using ICMarkets.Api.Infrastructure;
+using ICMarkets.Application;
 using ICMarkets.Infrastructure;
 using ICMarkets.Infrastructure.Persistence;
 using Microsoft.EntityFrameworkCore;
@@ -7,10 +9,16 @@ var builder = WebApplication.CreateBuilder(args);
 
 builder.Services.AddControllers();
 builder.Services.AddOpenApi();
+builder.Services.AddApplication();
 builder.Services.AddInfrastructure(builder.Configuration);
 builder.Services.AddSingleton(TimeProvider.System);
 
+builder.Services.AddExceptionHandler<ValidationExceptionHandler>();
+builder.Services.AddProblemDetails();
+
 var app = builder.Build();
+
+app.UseExceptionHandler();
 
 app.MapOpenApi();
 app.MapScalarApiReference();

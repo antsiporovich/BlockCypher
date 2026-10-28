@@ -1,52 +1,40 @@
-using ICMarkets.Application.Abstractions;
-using ICMarkets.Domain.Entities;
+using ICMarkets.Application.Features.History;
+using ICMarkets.Application.Features.Ingestion;
+using ICMarkets.Application.Features.Networks;
+using MediatR;
 using Microsoft.AspNetCore.Mvc;
 
 namespace ICMarkets.Api.Controllers;
 
 [ApiController]
 [Route("api/v1/blockchains")]
-public class BlockchainsController(IBlockCypherClient client, IBlockchainRepository repo, TimeProvider clock) : ControllerBase
+public class BlockchainsController(ISender sender) : ControllerBase
 {
-    // ponytail: single network wired here on purpose - Phase 5 loops all 5 networks
-    // in parallel (Channels + Parallel.ForEachAsync). Route shape stays stable across phases.
-    private const string Network = "btc-main";
-
     [HttpPost("ingest")]
-    public async Task<IActionResult> Ingest(CancellationToken ct)
+    public async Task<IActionResult> IngestAll(CancellationToken ct)
     {
-        var result = await client.GetChainInfoAsync("btc/main", ct);
-        var info = result.Dto;
-
-        var snapshot = new BlockchainSnapshot
-        {
-            Network = Network,
-            Name = info.Name,
-            Height = info.Height,
-            Hash = info.Hash,
-            Time = info.Time,
-            LatestUrl = info.LatestUrl,
-            PreviousHash = info.PreviousHash,
-            PreviousUrl = info.PreviousUrl,
-            PeerCount = info.PeerCount,
-            UnconfirmedCount = info.UnconfirmedCount,
-            HighFeePerKb = info.HighFeePerKb,
-            MediumFeePerKb = info.MediumFeePerKb,
-            LowFeePerKb = info.LowFeePerKb,
-            LastForkHeight = info.LastForkHeight,
-            LastForkHash = info.LastForkHash,
-            RawJson = result.RawJson,
-            CreatedAt = clock.GetUtcNow(),
-        };
-
-        await repo.AddAsync(snapshot, ct);
-        return Ok(snapshot);
+        var result = await sender.Send(new IngestAllChainsCommand(), ct);
+        return Ok(result);
     }
 
     [HttpGet("{network}/history")]
     public async Task<IActionResult> History(string network, [FromQuery] int take = 50, [FromQuery] int skip = 0, CancellationToken ct = default)
     {
-        var history = await repo.GetHistoryAsync(network, take, skip, ct);
+        var history = await sender.Send(new GetChainHistoryQuery(network, take, skip), ct);
         return Ok(history);
+    }
+
+    [HttpGet("{network}/latest")]
+    public async Task<IActionResult> Latest(string network, CancellationToken ct)
+    {
+        var snapshot = await sender.Send(new GetLatestSnapshotQuery(network), ct);
+        return snapshot is null ? NotFound() : Ok(snapshot);
+    }
+
+    [HttpGet("networks")]
+    public async Task<IActionResult> Networks(CancellationToken ct)
+    {
+        var networks = await sender.Send(new GetNetworksQuery(), ct);
+        return Ok(networks);
     }
 }

@@ -24,9 +24,11 @@ public static class DependencyInjection
 
         services.AddScoped<IBlockchainRepository, BlockchainRepository>();
 
-        services.AddHttpClient<IBlockCypherClient, BlockCypherClient>(c =>
+        services.Configure<BlockCypherOptions>(config.GetSection(BlockCypherOptions.SectionName));
+        services.AddHttpClient<IBlockCypherClient, BlockCypherClient>((sp, c) =>
         {
-            c.BaseAddress = new Uri(config["BlockCypher:BaseUrl"]!);
+            var opts = sp.GetRequiredService<Microsoft.Extensions.Options.IOptions<BlockCypherOptions>>().Value;
+            c.BaseAddress = new Uri(opts.BaseUrl);
             c.DefaultRequestHeaders.UserAgent.ParseAdd("ICMarkets-BlockCypher-Assessment/1.0");
         });
 

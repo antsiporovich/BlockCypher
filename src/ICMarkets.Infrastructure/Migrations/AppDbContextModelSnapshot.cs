@@ -40,9 +40,6 @@ namespace ICMarkets.Infrastructure.Migrations
                     b.Property<long>("Height")
                         .HasColumnType("bigint");
 
-                    b.Property<long?>("HighFeePerKb")
-                        .HasColumnType("bigint");
-
                     b.Property<string>("LastForkHash")
                         .HasColumnType("nvarchar(max)");
 
@@ -51,12 +48,6 @@ namespace ICMarkets.Infrastructure.Migrations
 
                     b.Property<string>("LatestUrl")
                         .HasColumnType("nvarchar(max)");
-
-                    b.Property<long?>("LowFeePerKb")
-                        .HasColumnType("bigint");
-
-                    b.Property<long?>("MediumFeePerKb")
-                        .HasColumnType("bigint");
 
                     b.Property<string>("Name")
                         .IsRequired()
@@ -88,6 +79,79 @@ namespace ICMarkets.Infrastructure.Migrations
                     b.HasKey("Id");
 
                     b.ToTable("Snapshots");
+                });
+
+            modelBuilder.Entity("ICMarkets.Domain.Entities.BlockchainSnapshot", b =>
+                {
+                    b.OwnsOne("ICMarkets.Domain.ValueObjects.FeeRates", "FeeRates", b1 =>
+                        {
+                            b1.Property<int>("BlockchainSnapshotId")
+                                .HasColumnType("int");
+
+                            b1.Property<long?>("High")
+                                .HasColumnType("bigint")
+                                .HasColumnName("HighFeePerKb");
+
+                            b1.Property<long?>("Low")
+                                .HasColumnType("bigint")
+                                .HasColumnName("LowFeePerKb");
+
+                            b1.Property<long?>("Medium")
+                                .HasColumnType("bigint")
+                                .HasColumnName("MediumFeePerKb");
+
+                            b1.HasKey("BlockchainSnapshotId");
+
+                            b1.ToTable("Snapshots");
+
+                            b1.WithOwner()
+                                .HasForeignKey("BlockchainSnapshotId");
+                        });
+
+                    b.OwnsOne("ICMarkets.Domain.ValueObjects.GasPrices", "GasPrices", b1 =>
+                        {
+                            b1.Property<int>("BlockchainSnapshotId")
+                                .HasColumnType("int");
+
+                            b1.Property<long?>("BaseFee")
+                                .HasColumnType("bigint")
+                                .HasColumnName("BaseFee");
+
+                            b1.Property<long?>("High")
+                                .HasColumnType("bigint")
+                                .HasColumnName("HighGasPrice");
+
+                            b1.Property<long?>("HighPriorityFee")
+                                .HasColumnType("bigint")
+                                .HasColumnName("HighPriorityFee");
+
+                            b1.Property<long?>("Low")
+                                .HasColumnType("bigint")
+                                .HasColumnName("LowGasPrice");
+
+                            b1.Property<long?>("LowPriorityFee")
+                                .HasColumnType("bigint")
+                                .HasColumnName("LowPriorityFee");
+
+                            b1.Property<long?>("Medium")
+                                .HasColumnType("bigint")
+                                .HasColumnName("MediumGasPrice");
+
+                            b1.Property<long?>("MediumPriorityFee")
+                                .HasColumnType("bigint")
+                                .HasColumnName("MediumPriorityFee");
+
+                            b1.HasKey("BlockchainSnapshotId");
+
+                            b1.ToTable("Snapshots");
+
+                            b1.WithOwner()
+                                .HasForeignKey("BlockchainSnapshotId");
+                        });
+
+                    b.Navigation("FeeRates");
+
+                    b.Navigation("GasPrices");
                 });
 #pragma warning restore 612, 618
         }
