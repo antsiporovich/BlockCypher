@@ -1,6 +1,7 @@
 using ICMarkets.Application.Dtos;
 using ICMarkets.Domain;
 using MediatR;
+using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging;
 
 namespace ICMarkets.Application.Features.Ingestion;
@@ -13,32 +14,44 @@ public sealed record IngestAllChainsResult(
     IReadOnlyList<BlockchainSnapshotDto> Succeeded,
     IReadOnlyList<IngestFailure> Failed);
 
-public sealed class IngestAllChainsCommandHandler(ISender sender, ILogger<IngestAllChainsCommandHandler> logger)
+public sealed class IngestAllChainsCommandHandler(
+    IServiceScopeFactory scopeFactory,
+    ILogger<IngestAllChainsCommandHandler> logger)
     : IRequestHandler<IngestAllChainsCommand, IngestAllChainsResult>
 {
-    // ponytail: sequential for now - Phase 5 upgrades this loop to bounded
-    // Channels + Parallel.ForEachAsync with a fresh DI scope per branch
-    // (DbContext isn't thread-safe). Route shape and per-network isolation
-    // (try/catch per network, no partial-failure abort) already match the
-    // Phase 5 contract, so only the loop body changes.
+    // Task.WhenAll across all 5 networks. Each branch gets its own DI scope
+    // (and so its own AppDbContext/ISender) rather than sharing the ambient
+    // scoped ISender - DbContext isn't thread-safe, so concurrent SaveChanges
+    // calls on one shared instance would throw. Per-network failures are
+    // caught locally and never abort the batch.
+    // shortcut: concurrency here is unbounded (only 5 networks, so 5
+    // concurrent HTTP calls is harmless). Phase 5b replaces this with a
+    // bounded Channels + Parallel.ForEachAsync pipeline for the general case.
     public async Task<IngestAllChainsResult> Handle(IngestAllChainsCommand request, CancellationToken ct)
     {
-        var succeeded = new List<BlockchainSnapshotDto>();
-        var failed = new List<IngestFailure>();
+        var tasks = Enum.GetValues<Network>().Select(network => IngestOneAsync(network, ct));
+        var results = await Task.WhenAll(tasks);
 
-        foreach (var network in Enum.GetValues<Network>())
-        {
-            try
-            {
-                succeeded.Add(await sender.Send(new IngestChainCommand(network), ct));
-            }
-            catch (Exception ex)
-            {
-                logger.LogWarning(ex, "Ingestion failed for {Network}", network);
-                failed.Add(new IngestFailure(network, ex.Message));
-            }
-        }
+        var succeeded = results.Where(r => r.Snapshot is not null).Select(r => r.Snapshot!).ToList();
+        var failed = results.Where(r => r.Failure is not null).Select(r => r.Failure!).ToList();
 
         return new IngestAllChainsResult(succeeded, failed);
+    }
+
+    private async Task<(BlockchainSnapshotDto? Snapshot, IngestFailure? Failure)> IngestOneAsync(Network network, CancellationToken ct)
+    {
+        using var scope = scopeFactory.CreateScope();
+        var sender = scope.ServiceProvider.GetRequiredService<ISender>();
+
+        try
+        {
+            var dto = await sender.Send(new IngestChainCommand(network), ct);
+            return (dto, null);
+        }
+        catch (Exception ex)
+        {
+            logger.LogWarning(ex, "Ingestion failed for {Network}", network);
+            return (null, new IngestFailure(network, ex.Message));
+        }
     }
 }

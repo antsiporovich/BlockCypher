@@ -10,10 +10,13 @@ public class BlockCypherClient(HttpClient http, IOptions<BlockCypherOptions> opt
 {
     public async Task<ChainInfoResult> GetChainInfoAsync(Network network, CancellationToken ct)
     {
-        if (!options.Value.Networks.TryGetValue(network, out var path))
+        var opts = options.Value;
+        if (!opts.Networks.TryGetValue(network, out var path))
             throw new InvalidOperationException($"No BlockCypher path configured for network '{network}'.");
 
-        var raw = await http.GetStringAsync(path, ct);
+        var requestUri = string.IsNullOrWhiteSpace(opts.Token) ? path : $"{path}?token={opts.Token}";
+
+        var raw = await http.GetStringAsync(requestUri, ct);
         var dto = JsonSerializer.Deserialize<BlockCypherChainInfoDto>(raw)
             ?? throw new InvalidOperationException($"BlockCypher returned no data for '{path}'.");
         return new ChainInfoResult(dto, raw);

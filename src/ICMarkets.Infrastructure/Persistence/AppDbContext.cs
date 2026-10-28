@@ -1,3 +1,4 @@
+using ICMarkets.Application.Abstractions;
 using ICMarkets.Domain;
 using ICMarkets.Domain.Entities;
 using ICMarkets.Domain.Events;
@@ -6,7 +7,8 @@ using Microsoft.EntityFrameworkCore;
 
 namespace ICMarkets.Infrastructure.Persistence;
 
-public class AppDbContext(DbContextOptions<AppDbContext> options, IPublisher publisher) : DbContext(options)
+public class AppDbContext(DbContextOptions<AppDbContext> options, IPublisher publisher)
+    : DbContext(options), IUnitOfWork
 {
     public DbSet<BlockchainSnapshot> Snapshots => Set<BlockchainSnapshot>();
 
@@ -18,6 +20,10 @@ public class AppDbContext(DbContextOptions<AppDbContext> options, IPublisher pub
 
             b.Property(s => s.Network)
                 .HasConversion(n => NetworkKey.ToKey(n), s => NetworkKey.Parse(s));
+
+            // supports GetHistoryAsync/GetLatestAsync: filter by Network, newest first.
+            b.HasIndex(s => new { s.Network, s.CreatedAt })
+                .IsDescending(false, true);
 
             b.OwnsOne(s => s.FeeRates, fr =>
             {

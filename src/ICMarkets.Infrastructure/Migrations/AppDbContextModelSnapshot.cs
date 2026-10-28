@@ -55,7 +55,7 @@ namespace ICMarkets.Infrastructure.Migrations
 
                     b.Property<string>("Network")
                         .IsRequired()
-                        .HasColumnType("nvarchar(max)");
+                        .HasColumnType("nvarchar(450)");
 
                     b.Property<int>("PeerCount")
                         .HasColumnType("int");
@@ -77,6 +77,9 @@ namespace ICMarkets.Infrastructure.Migrations
                         .HasColumnType("int");
 
                     b.HasKey("Id");
+
+                    b.HasIndex("Network", "CreatedAt")
+                        .IsDescending(false, true);
 
                     b.ToTable("Snapshots");
                 });

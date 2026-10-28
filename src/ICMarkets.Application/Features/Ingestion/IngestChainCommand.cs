@@ -13,6 +13,7 @@ public sealed record IngestChainCommand(Network Network) : IRequest<BlockchainSn
 public sealed class IngestChainCommandHandler(
     IBlockCypherClient client,
     IBlockchainRepository repo,
+    IUnitOfWork unitOfWork,
     TimeProvider clock,
     SnapshotMapper mapper) : IRequestHandler<IngestChainCommand, BlockchainSnapshotDto>
 {
@@ -50,6 +51,7 @@ public sealed class IngestChainCommandHandler(
             createdAt: clock.GetUtcNow());
 
         await repo.AddAsync(snapshot, ct);
+        await unitOfWork.SaveChangesAsync(ct);
         return mapper.ToDto(snapshot);
     }
 }
