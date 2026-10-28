@@ -1,0 +1,6 @@
+@ICMarkets.Api_HostAddress = http://localhost:5207
+
+GET {{ICMarkets.Api_HostAddress}}/weatherforecast/
+Accept: application/json
+
+###

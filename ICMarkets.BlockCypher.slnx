@@ -1,0 +1,13 @@
+<Solution>
+  <Folder Name="/src/">
+    <Project Path="src/ICMarkets.Api/ICMarkets.Api.csproj" />
+    <Project Path="src/ICMarkets.Application/ICMarkets.Application.csproj" />
+    <Project Path="src/ICMarkets.Domain/ICMarkets.Domain.csproj" />
+    <Project Path="src/ICMarkets.Infrastructure/ICMarkets.Infrastructure.csproj" />
+  </Folder>
+  <Folder Name="/tests/">
+    <Project Path="tests/ICMarkets.FunctionalTests/ICMarkets.FunctionalTests.csproj" />
+    <Project Path="tests/ICMarkets.IntegrationTests/ICMarkets.IntegrationTests.csproj" />
+    <Project Path="tests/ICMarkets.UnitTests/ICMarkets.UnitTests.csproj" />
+  </Folder>
+</Solution>

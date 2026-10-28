@@ -1,0 +1,7 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <ItemGroup>
+    <ProjectReference Include="..\ICMarkets.Domain\ICMarkets.Domain.csproj" />
+  </ItemGroup>
+
+</Project>
