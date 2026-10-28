@@ -1,3 +1,6 @@
+using System.Collections.Concurrent;
+using System.Threading.Channels;
+using ICMarkets.Application.Abstractions;
 using ICMarkets.Application.Dtos;
 using ICMarkets.Domain;
 using MediatR;
@@ -14,44 +17,110 @@ public sealed record IngestAllChainsResult(
     IReadOnlyList<BlockchainSnapshotDto> Succeeded,
     IReadOnlyList<IngestFailure> Failed);
 
+// Producer/consumer pipeline over a bounded Channel<T>: a bounded-concurrency
+// producer fetches from BlockCypher for all 5 networks, a single consumer
+// persists them one at a time. See README.md "Concurrency" for why this is
+// Task-based (Channels + Parallel.ForEachAsync) and not PLINQ.
 public sealed class IngestAllChainsCommandHandler(
     IServiceScopeFactory scopeFactory,
     ILogger<IngestAllChainsCommandHandler> logger)
     : IRequestHandler<IngestAllChainsCommand, IngestAllChainsResult>
 {
-    // Task.WhenAll across all 5 networks. Each branch gets its own DI scope
-    // (and so its own AppDbContext/ISender) rather than sharing the ambient
-    // scoped ISender - DbContext isn't thread-safe, so concurrent SaveChanges
-    // calls on one shared instance would throw. Per-network failures are
-    // caught locally and never abort the batch.
-    // shortcut: concurrency here is unbounded (only 5 networks, so 5
-    // concurrent HTTP calls is harmless). Phase 5b replaces this with a
-    // bounded Channels + Parallel.ForEachAsync pipeline for the general case.
+    // Bounded, not unbounded fan-out: BlockCypher rate-limits unauthenticated
+    // callers, so this caps how many fetches run at once.
+    private const int MaxFetchConcurrency = 3;
+
+    // Backpressure valve: once this many fetched-but-not-yet-persisted items
+    // are queued, a producer branch blocks on WriteAsync until the single
+    // consumer catches up. Not a throughput-tuned queue depth - just enough
+    // slack that a fast fetch doesn't idle while the previous item persists.
+    private const int ChannelCapacity = 4;
+
     public async Task<IngestAllChainsResult> Handle(IngestAllChainsCommand request, CancellationToken ct)
     {
-        var tasks = Enum.GetValues<Network>().Select(network => IngestOneAsync(network, ct));
-        var results = await Task.WhenAll(tasks);
+        var channel = Channel.CreateBounded<FetchedChain>(new BoundedChannelOptions(ChannelCapacity)
+        {
+            SingleReader = true,
+            SingleWriter = false,
+        });
 
-        var succeeded = results.Where(r => r.Snapshot is not null).Select(r => r.Snapshot!).ToList();
-        var failed = results.Where(r => r.Failure is not null).Select(r => r.Failure!).ToList();
+        var failures = new ConcurrentBag<IngestFailure>();
 
-        return new IngestAllChainsResult(succeeded, failed);
+        var producing = ProduceAsync(channel.Writer, failures, ct);
+        var succeeded = await ConsumeAsync(channel.Reader, failures, ct);
+        await producing; // surfaces a producer-level exception (e.g. cancellation) to the caller
+
+        return new IngestAllChainsResult(succeeded, failures.ToList());
     }
 
-    private async Task<(BlockchainSnapshotDto? Snapshot, IngestFailure? Failure)> IngestOneAsync(Network network, CancellationToken ct)
+    // Parallel.ForEachAsync, not PLINQ: this work is I/O-bound (waiting on
+    // HTTP), not CPU-bound, so there's nothing for a CPU-partitioning LINQ
+    // operator to parallelize - it would just block thread-pool threads on
+    // I/O. Parallel.ForEachAsync with an async delegate and an explicit
+    // MaxDegreeOfParallelism is the correct, bounded tool for this.
+    private async Task ProduceAsync(ChannelWriter<FetchedChain> writer, ConcurrentBag<IngestFailure> failures, CancellationToken ct)
     {
+        try
+        {
+            await Parallel.ForEachAsync(
+                Enum.GetValues<Network>(),
+                new ParallelOptions { MaxDegreeOfParallelism = MaxFetchConcurrency, CancellationToken = ct },
+                async (network, token) =>
+                {
+                    // fresh DI scope per branch: IBlockCypherClient itself is
+                    // safe to share, but this keeps the same scoping discipline
+                    // as the consumer side and avoids any future dependency on
+                    // this client becoming scoped/stateful surprising someone.
+                    using var scope = scopeFactory.CreateScope();
+                    var client = scope.ServiceProvider.GetRequiredService<IBlockCypherClient>();
+                    try
+                    {
+                        var result = await client.GetChainInfoAsync(network, token);
+                        await writer.WriteAsync(new FetchedChain(network, result), token);
+                    }
+                    catch (Exception ex) when (ex is not OperationCanceledException)
+                    {
+                        logger.LogWarning(ex, "Fetch failed for {Network}", network);
+                        failures.Add(new IngestFailure(network, ex.Message));
+                    }
+                });
+        }
+        finally
+        {
+            // always complete the writer, even on cancellation or an
+            // unexpected exception, so the consumer's ReadAllAsync loop
+            // terminates instead of hanging forever.
+            writer.Complete();
+        }
+    }
+
+    private async Task<List<BlockchainSnapshotDto>> ConsumeAsync(
+        ChannelReader<FetchedChain> reader, ConcurrentBag<IngestFailure> failures, CancellationToken ct)
+    {
+        // Single consumer: every persist goes through one DI scope (one
+        // AppDbContext) sequentially, so there's no concurrent SaveChanges
+        // and no extra locking needed - DbContext just never sees two
+        // operations in flight at once.
+        var succeeded = new List<BlockchainSnapshotDto>();
         using var scope = scopeFactory.CreateScope();
         var sender = scope.ServiceProvider.GetRequiredService<ISender>();
 
-        try
+        await foreach (var item in reader.ReadAllAsync(ct))
         {
-            var dto = await sender.Send(new IngestChainCommand(network), ct);
-            return (dto, null);
+            try
+            {
+                var dto = await sender.Send(new PersistSnapshotCommand(item.Network, item.Result), ct);
+                succeeded.Add(dto);
+            }
+            catch (Exception ex) when (ex is not OperationCanceledException)
+            {
+                logger.LogWarning(ex, "Persist failed for {Network}", item.Network);
+                failures.Add(new IngestFailure(item.Network, ex.Message));
+            }
         }
-        catch (Exception ex)
-        {
-            logger.LogWarning(ex, "Ingestion failed for {Network}", network);
-            return (null, new IngestFailure(network, ex.Message));
-        }
+
+        return succeeded;
     }
+
+    private sealed record FetchedChain(Network Network, ChainInfoResult Result);
 }
