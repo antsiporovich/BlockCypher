@@ -1,0 +1,56 @@
+# Same image/edition as docker-compose.yml's `db` service. No PersistentVolumeClaim
+# on purpose - this mirrors compose's role (disposable dev/demo instance), not a
+# production-grade stateful deployment. Add a PVC + StatefulSet for that.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: mssql
+  namespace: icmarkets
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: mssql
+  template:
+    metadata:
+      labels:
+        app: mssql
+    spec:
+      containers:
+        - name: mssql
+          image: mcr.microsoft.com/mssql/server:2022-latest
+          ports:
+            - containerPort: 1433
+          env:
+            - name: ACCEPT_EULA
+              value: "Y"
+            - name: MSSQL_PID
+              value: "Developer"
+            - name: MSSQL_SA_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: icmarkets-api-secrets
+                  key: MSSQL_SA_PASSWORD
+          readinessProbe:
+            exec:
+              command:
+                - /bin/sh
+                - -c
+                - >-
+                  /opt/mssql-tools18/bin/sqlcmd -S localhost -U sa -P "$MSSQL_SA_PASSWORD"
+                  -C -Q "SELECT 1" || exit 1
+            initialDelaySeconds: 20
+            periodSeconds: 10
+            failureThreshold: 10
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: mssql
+  namespace: icmarkets
+spec:
+  selector:
+    app: mssql
+  ports:
+    - port: 1433
+      targetPort: 1433

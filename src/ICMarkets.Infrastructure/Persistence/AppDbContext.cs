@@ -1,16 +1,24 @@
+using System.Text.Json;
 using ICMarkets.Application.Abstractions;
 using ICMarkets.Domain;
 using ICMarkets.Domain.Entities;
 using ICMarkets.Domain.Events;
+using ICMarkets.Infrastructure.Messaging;
 using MediatR;
 using Microsoft.EntityFrameworkCore;
+using Microsoft.Extensions.Options;
 
 namespace ICMarkets.Infrastructure.Persistence;
 
-public class AppDbContext(DbContextOptions<AppDbContext> options, IPublisher publisher)
+// outboxOptions is optional so design-time (DesignTimeDbContextFactory) and the
+// integration tests can construct the context with `new AppDbContext(options,
+// publisher)` without wiring options; at runtime DI always injects the real
+// IOptions<OutboxOptions>. Null => outbox disabled (the write is gated below).
+public class AppDbContext(DbContextOptions<AppDbContext> options, IPublisher publisher, IOptions<OutboxOptions>? outboxOptions = null)
     : DbContext(options), IUnitOfWork
 {
     public DbSet<BlockchainSnapshot> Snapshots => Set<BlockchainSnapshot>();
+    public DbSet<OutboxMessage> Outbox => Set<OutboxMessage>();
 
     protected override void OnModelCreating(ModelBuilder modelBuilder)
     {
@@ -55,6 +63,16 @@ public class AppDbContext(DbContextOptions<AppDbContext> options, IPublisher pub
                 gp.Property(g => g.LowPriorityFee).HasColumnName("LowPriorityFee");
             });
         });
+
+        modelBuilder.Entity<OutboxMessage>(b =>
+        {
+            b.Property(m => m.Type).IsRequired().HasMaxLength(200);
+            b.Property(m => m.Payload).IsRequired();
+            // never ordered/compared in SQL (OutboxPublisherWorker orders by
+            // Id), so no SQLite DateTimeOffset conversion needed here, unlike
+            // BlockchainSnapshot.CreatedAt above.
+            b.HasIndex(m => m.ProcessedAt);
+        });
     }
 
     // dispatches domain events raised on tracked entities after a successful
@@ -65,6 +83,28 @@ public class AppDbContext(DbContextOptions<AppDbContext> options, IPublisher pub
         var pendingEvents = ChangeTracker.Entries<BlockchainSnapshot>()
             .SelectMany(e => e.Entity.DomainEvents)
             .ToList();
+
+        // Transactional outbox: the row is added to the SAME SaveChanges call
+        // as the snapshot that raised the event, so both commit together or
+        // neither does - see OutboxMessage for why that matters. Gated on
+        // Outbox:Enabled - OutboxPublisherWorker is the only thing that ever
+        // drains this table, and it no-ops when disabled (default for
+        // local/SQLite dev and the functional tests), so writing rows nobody
+        // will read would just grow the table forever. Flipping Outbox:Enabled
+        // back on starts writing - and publishing - events from that point on.
+        if (outboxOptions?.Value.Enabled == true)
+        {
+            foreach (var domainEvent in pendingEvents)
+            {
+                if (domainEvent is SnapshotIngested ingested)
+                {
+                    Outbox.Add(OutboxMessage.Create(
+                        type: nameof(SnapshotIngested),
+                        payload: JsonSerializer.Serialize(ingested),
+                        occurredAt: ingested.CreatedAt));
+                }
+            }
+        }
 
         var result = await base.SaveChangesAsync(ct);
 

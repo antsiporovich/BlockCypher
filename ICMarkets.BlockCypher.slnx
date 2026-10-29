@@ -3,6 +3,7 @@
     <Project Path="src/ICMarkets.Api/ICMarkets.Api.csproj" />
     <Project Path="src/ICMarkets.Application/ICMarkets.Application.csproj" />
     <Project Path="src/ICMarkets.Domain/ICMarkets.Domain.csproj" />
+    <Project Path="src/ICMarkets.Gateway/ICMarkets.Gateway.csproj" />
     <Project Path="src/ICMarkets.Infrastructure/ICMarkets.Infrastructure.csproj" />
   </Folder>
   <Folder Name="/tests/">

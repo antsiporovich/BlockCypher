@@ -1,6 +1,7 @@
 using ICMarkets.Application.Abstractions;
 using ICMarkets.Infrastructure.BackgroundServices;
 using ICMarkets.Infrastructure.BlockCypher;
+using ICMarkets.Infrastructure.Messaging;
 using ICMarkets.Infrastructure.Persistence;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Configuration;
@@ -56,6 +57,15 @@ public static class DependencyInjection
 
         services.Configure<IngestionOptions>(config.GetSection(IngestionOptions.SectionName));
         services.AddHostedService<ChainIngestionWorker>();
+
+        // Event-driven outbound edge: SnapshotIngested events are written to
+        // the outbox transactionally (AppDbContext.SaveChangesAsync) and
+        // drained to RabbitMQ by OutboxPublisherWorker, which no-ops when
+        // Outbox:Enabled is false - no RabbitMQ required for local/SQLite
+        // dev or the functional tests.
+        services.Configure<OutboxOptions>(config.GetSection(OutboxOptions.SectionName));
+        services.AddSingleton<IEventPublisher, RabbitMqEventPublisher>();
+        services.AddHostedService<OutboxPublisherWorker>();
 
         services.AddHealthChecks().AddDbContextCheck<AppDbContext>();
 

@@ -7,6 +7,9 @@ A .NET 10 Web API that periodically pulls network summaries for five blockchains
 timestamp, and exposes endpoints that return the stored **history** — newest first — rather than
 proxying BlockCypher live.
 
+📄 **[Solution Overview (PDF)](docs/ICMarkets-BlockCypher-Solution-Overview.pdf)** — a narrative walkthrough
+of the design for reviewers who'd rather read a summary than trace it through the code.
+
 ## Quick start — Docker (recommended, no .NET SDK needed)
 
 ```bash
@@ -19,9 +22,12 @@ Then open:
 - Health: http://localhost:8080/health
 - Prometheus: http://localhost:9090
 - Grafana: http://localhost:3000 (anonymous viewer access, admin/admin)
+- RabbitMQ management UI: http://localhost:15672 (guest/guest)
+- API Gateway (optional, same endpoints via a YARP reverse proxy): http://localhost:8081
 
-This starts SQL Server 2022, the API, Prometheus and Grafana together. The API waits for SQL Server's
-healthcheck and applies EF Core migrations on startup, so the database schema is ready automatically.
+This starts SQL Server 2022, RabbitMQ, the API, the optional API Gateway, Prometheus and Grafana
+together. The API waits for SQL Server's and RabbitMQ's healthchecks and applies EF Core migrations on
+startup, so the database schema is ready automatically.
 
 Optional: set a free [BlockCypher token](https://accounts.blockcypher.com/) in the host shell before
 `docker compose up` to raise the anonymous rate limit:
@@ -206,19 +212,51 @@ variables (`Database__Provider`, etc. — the compose file shows this).
   directly. This is also what makes the functional tests fast, deterministic and independent of
   BlockCypher's availability or rate limits (WireMock stands in for BlockCypher there).
 
+## Requirement coverage
+
+The requirements below map each capability — domain-driven microservices, multithreading and
+concurrency, Clean/Vertical Slice/CQRS, event-driven messaging, full observability, CI/CD,
+Kubernetes — to where it lives in this codebase, rather than leaving it implicit:
+
+| Requirement | Where it lives here |
+|---|---|
+| Multithreading, concurrency, thread safety, fault tolerance | Bounded `System.Threading.Channels` + `Parallel.ForEachAsync` ingestion pipeline, per-branch DI scopes, per-network failure isolation — see "Design decisions & trade-offs" above and ADR 0004. |
+| Clean Architecture + Vertical Slice + CQRS | Four-layer Clean Architecture with feature folders (`Application/Features/{Ingestion,History,Networks}`) inside it; CQRS via MediatR. See "Architecture" and "Design patterns used" above. |
+| Domain-driven | `BlockchainSnapshot` as a rich entity with a static factory, `FeeRates`/`GasPrices` value objects, a `SnapshotIngested` domain event — deliberately scoped short of full tactical DDD, which five snapshot tables don't justify. |
+| Event-driven design (Kafka/AWS SQS/RabbitMQ) | Transactional outbox + **RabbitMQ** publisher on `SnapshotIngested` (`Infrastructure/Messaging/`), off by default, on in `docker-compose.yml`. A fanout exchange means a Kafka or SQS consumer could subscribe without this publisher changing; swapping the exchange for a Kafka topic is a new `IEventPublisher` implementation, not a redesign. |
+| Saga pattern for distributed transactions | Not implemented — this service has one aggregate and no cross-service transaction to coordinate. Noted here as the natural next step if ingestion and persistence ever split into separate services. |
+| OpenTelemetry, Prometheus, Grafana, Elastic/Kibana | Full OTel traces/metrics/logs, `/metrics` scraped by Prometheus, a provisioned Grafana dashboard in `docker-compose.yml`, and Elastic Common Schema-formatted console logs (Kibana-ingestible without standing up a full ELK stack). |
+| TDD, unit/integration/performance tests | Four test projects: Unit, Integration (real SQL Server via Testcontainers), Functional (WireMock-stubbed), Performance (BenchmarkDotNet). See "Testing" above. |
+| CI/CD | `.github/workflows/ci.yml` — restore, build, test on every push. |
+| Docker, Kubernetes | Multi-stage Dockerfiles for every service; `docker-compose.yml` is the primary, verified run path; `k8s/` has Deployment/Service/ConfigMap manifests for the same stack (best-effort, not cluster-tested — see `k8s/README.md`). |
+| Advanced SQL Server optimization | Config-driven provider, composite `(Network, CreatedAt DESC)` index, `EnableRetryOnFailure`, pinned image version — see ADR 0002. |
+| Agile/Scrum, code review habits | Scoped, meaningful commit history across `main`/`development` rather than one large commit; see the repository's own history. |
+
+**If this grew past one service**: the ingestion worker and the read API are already only coupled
+through the database and the outbox — splitting them into an ingestion service and a read service
+communicating over the same RabbitMQ exchange (or Kafka/SQS in a larger deployment) would be a
+redeployment, not a rewrite. The optional **YARP API Gateway** (`src/ICMarkets.Gateway`) is a first
+step in that direction: a thin reverse proxy that would sit in front of however many backend services
+this became, while every route currently lives on one.
+
 ## Known limitations / what I'd do next
 
-- **No API Gateway (YARP)** — named as optional in the task; natural next step if this grew more than
-  one backend service.
-- **No outbox pattern / message broker** — `SnapshotIngested` is currently an in-process domain event
-  only. An outbox table + RabbitMQ/Kafka publisher would make ingestion notifications durable across a
-  restart and let other services react to new snapshots without polling this API.
 - **No auth** — out of scope for the assessment brief; a real deployment would put this behind
   JWT/OAuth2 and scope the CORS policy to real origins.
 - **No distributed cache** — `GetLatestSnapshotQuery` hits the database on every call; a short-TTL
   Redis cache in front of it would cut load under real traffic without affecting ingestion correctness.
-- **Kubernetes manifests** — not included; `docker-compose.yml` was judged sufficient for a take-home
-  review, but the existing multi-stage Dockerfiles translate directly into a Deployment + Service +
-  ConfigMap if needed.
+- **RabbitMQ only, not Kafka/SQS** — `IEventPublisher` is the seam for either; RabbitMQ was the
+  cheapest real broker to run in `docker-compose.yml` for this exercise.
+- **Kubernetes manifests aren't cluster-tested** — `docker-compose.yml` remains the verified path; see
+  `k8s/README.md` for what's simplified.
+- **Swagger/Scalar/OpenAPI are exposed unconditionally, including in `Production`** — the k8s manifests
+  set `ASPNETCORE_ENVIRONMENT=Production` and the docs are still reachable there (the k8s README routes
+  reviewers through `/swagger` via port-forward). Intentional for this assessment, so a reviewer doesn't
+  need a second environment switch just to see the API docs; a real deployment would gate
+  `MapOpenApi`/`MapScalarApiReference`/`UseSwaggerUI` behind `app.Environment.IsDevelopment()` or a
+  feature flag.
+- **Outbox retention** — `OutboxPublisherWorker` purges processed rows older than
+  `Outbox:RetentionHours` (default 24h) on every tick, and the table is never written to at all while
+  `Outbox:Enabled` is false (the default local/SQLite path), so it stays bounded in both modes.
 
 See `docs/adr/` for the fuller reasoning behind the choices above.

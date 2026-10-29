@@ -5,6 +5,7 @@ using ICMarkets.Application;
 using ICMarkets.Application.Telemetry;
 using ICMarkets.Infrastructure;
 using ICMarkets.Infrastructure.Persistence;
+using Microsoft.AspNetCore.HttpOverrides;
 using Microsoft.EntityFrameworkCore;
 using OpenTelemetry.Metrics;
 using OpenTelemetry.Resources;
@@ -85,6 +86,22 @@ builder.Services.AddProblemDetails();
 
 var app = builder.Build();
 
+// Honor X-Forwarded-* from the optional YARP Gateway (src/ICMarkets.Gateway)
+// so HttpContext.Request.Host reflects the gateway's public host:port
+// (localhost:8081) instead of the internal Docker DNS name YARP otherwise
+// proxies with (api:8080) - without this, the native OpenAPI document's
+// auto-detected server URL bakes in "api:8080", which Swagger UI's "Execute"
+// can't reach from a host browser. KnownIPNetworks/KnownProxies are cleared
+// because the gateway's container IP isn't known ahead of time in compose;
+// fine for this stack, a real deployment would restrict it.
+var forwardedHeaders = new ForwardedHeadersOptions
+{
+    ForwardedHeaders = ForwardedHeaders.XForwardedFor | ForwardedHeaders.XForwardedProto | ForwardedHeaders.XForwardedHost,
+};
+forwardedHeaders.KnownIPNetworks.Clear();
+forwardedHeaders.KnownProxies.Clear();
+app.UseForwardedHeaders(forwardedHeaders);
+
 app.UseSerilogRequestLogging();
 
 app.UseExceptionHandler();
@@ -103,7 +120,7 @@ app.MapHealthChecks("/health");
 app.MapPrometheusScrapingEndpoint(); // GET /metrics
 
 // migrations on SQL Server, EnsureCreated on the SQLite no-Docker path
-// (documented compromise - see docs/DECISIONS.md)
+// (see ADR 0002 for why)
 using (var scope = app.Services.CreateScope())
 {
     var db = scope.ServiceProvider.GetRequiredService<AppDbContext>();

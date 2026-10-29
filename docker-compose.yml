@@ -21,6 +21,8 @@ services:
     depends_on:
       db:
         condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
     ports:
       - "8080:8080"
     environment:
@@ -35,6 +37,38 @@ services:
       # before `docker compose up` to raise the limit - unset/empty keeps
       # anonymous access, same as before.
       BlockCypher__Token: "${BlockCypher__Token:-}"
+      Outbox__Enabled: "true"
+      Outbox__HostName: "rabbitmq"
+
+  rabbitmq:
+    # pinned, not :3-management - a floating major tag means `docker compose
+    # up --build` can silently pull a newer RabbitMQ later; same reasoning as
+    # the pinned SQL Server image above. Verify this still resolves on Docker
+    # Hub before relying on it long-term.
+    image: rabbitmq:4.2.7-management
+    ports:
+      - "5672:5672"   # AMQP
+      - "15672:15672" # management UI (guest/guest)
+    healthcheck:
+      test: ["CMD", "rabbitmq-diagnostics", "-q", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 20s
+
+  # optional API Gateway (YARP) - a thin reverse proxy in front of `api`,
+  # the task's own optional item. `api` stays reachable directly on 8080;
+  # this just demonstrates the gateway shape on top of it.
+  gateway:
+    build:
+      context: .
+      dockerfile: src/ICMarkets.Gateway/Dockerfile
+    depends_on:
+      - api
+    ports:
+      - "8081:8081"
+    environment:
+      ReverseProxy__Clusters__api__Destinations__destination1__Address: "http://api:8080/"
 
   prometheus:
     build:
