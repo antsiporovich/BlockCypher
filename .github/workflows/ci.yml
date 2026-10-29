@@ -1,0 +1,37 @@
+name: CI
+
+on:
+  push:
+    branches: [main, development]
+  pull_request:
+    branches: [main, development]
+
+jobs:
+  build-and-test:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup .NET
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: "10.0.x"
+
+      - name: Restore
+        run: dotnet restore ICMarkets.BlockCypher.slnx
+
+      - name: Build
+        run: dotnet build ICMarkets.BlockCypher.slnx --configuration Release --no-restore
+
+      # ICMarkets.PerformanceTests is a standalone NBomber load-testing tool,
+      # deliberately not added to ICMarkets.BlockCypher.slnx, so it is never
+      # built or run here. The --filter below is belt-and-suspenders in case
+      # that changes later. Integration tests use Testcontainers.MsSql, which
+      # needs Docker - available by default on GitHub-hosted ubuntu runners -
+      # and skip themselves gracefully if it's ever unavailable.
+      - name: Test
+        run: >
+          dotnet test ICMarkets.BlockCypher.slnx
+          --configuration Release --no-build
+          --filter "FullyQualifiedName!~PerformanceTests"
