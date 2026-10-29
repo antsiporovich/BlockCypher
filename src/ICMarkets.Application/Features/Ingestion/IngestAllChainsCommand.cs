@@ -11,8 +11,14 @@ namespace ICMarkets.Application.Features.Ingestion;
 
 public sealed record IngestAllChainsCommand : IRequest<IngestAllChainsResult>;
 
+/// <summary>One network's ingestion failure, with the exception message.</summary>
+/// <param name="Network">The network key that failed.</param>
+/// <param name="Error">The exception message from the failed fetch or persist.</param>
 public sealed record IngestFailure(Network Network, string Error);
 
+/// <summary>Result of ingesting all configured networks in one batch.</summary>
+/// <param name="Succeeded">Snapshots that were fetched and persisted successfully.</param>
+/// <param name="Failed">Networks that failed, with the reason - never aborts the other networks.</param>
 public sealed record IngestAllChainsResult(
     IReadOnlyList<BlockchainSnapshotDto> Succeeded,
     IReadOnlyList<IngestFailure> Failed);
