@@ -39,7 +39,11 @@ public sealed class ChainIngestionWorker(
                     "Scheduled ingestion run: {Succeeded} succeeded, {Failed} failed.",
                     result.Succeeded.Count, result.Failed.Count);
             }
-            catch (Exception ex) when (ex is not OperationCanceledException)
+            // Only a cancelled stoppingToken means "shut down". Any other exception -
+            // including a stray timeout, which is an OperationCanceledException too -
+            // must NOT escape ExecuteAsync: the Generic Host would treat that as a
+            // fatal BackgroundService failure and stop the whole application.
+            catch (Exception ex) when (ex is not OperationCanceledException || !stoppingToken.IsCancellationRequested)
             {
                 logger.LogError(ex, "Scheduled ingestion run failed unexpectedly.");
             }

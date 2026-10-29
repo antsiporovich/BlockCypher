@@ -102,7 +102,11 @@ public sealed class IngestAllChainsCommandHandler(
                         var fetchedAt = clock.GetUtcNow();
                         await writer.WriteAsync(new FetchedChain(network, result, fetchedAt), token);
                     }
-                    catch (Exception ex) when (ex is not OperationCanceledException)
+                    // Discriminate by TOKEN, not by exception type: a timeout also surfaces
+                    // as an OperationCanceledException while `token` is NOT cancelled, and
+                    // that is one network failing - not a shutdown. Only a cancelled token
+                    // is allowed to propagate and abort the batch.
+                    catch (Exception ex) when (ex is not OperationCanceledException || !token.IsCancellationRequested)
                     {
                         logger.LogWarning(ex, "Fetch failed for {Network}", network);
                         failures.Add(new IngestFailure(network, ex.Message));
@@ -145,7 +149,8 @@ public sealed class IngestAllChainsCommandHandler(
                 var dto = await sender.Send(new PersistSnapshotCommand(item.Network, item.Result, item.FetchedAt), ct);
                 succeeded.Add(dto);
             }
-            catch (Exception ex) when (ex is not OperationCanceledException)
+            // same rule as the fetch side: only a cancelled token aborts the batch.
+            catch (Exception ex) when (ex is not OperationCanceledException || !ct.IsCancellationRequested)
             {
                 logger.LogWarning(ex, "Persist failed for {Network}", item.Network);
                 failures.Add(new IngestFailure(item.Network, ex.Message));

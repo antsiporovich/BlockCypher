@@ -79,7 +79,10 @@ public sealed class OutboxPublisherWorker(
                 if (published > 0)
                     logger.LogInformation("Published {Count} outbox message(s).", published);
             }
-            catch (Exception ex) when (ex is not OperationCanceledException)
+            // token-based, not type-based: a broker/network timeout can surface as an
+            // OperationCanceledException while stoppingToken is NOT cancelled, and must
+            // not escape ExecuteAsync (the Generic Host would stop the application).
+            catch (Exception ex) when (ex is not OperationCanceledException || !stoppingToken.IsCancellationRequested)
             {
                 // RabbitMQ unreachable, etc. - rows stay unprocessed, retried
                 // next tick. Never let this loop die.

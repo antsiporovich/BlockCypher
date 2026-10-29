@@ -16,7 +16,27 @@ public class BlockCypherClient(HttpClient http, IOptions<BlockCypherOptions> opt
 
         var requestUri = string.IsNullOrWhiteSpace(opts.Token) ? path : $"{path}?token={opts.Token}";
 
-        var raw = await http.GetStringAsync(requestUri, ct);
+        // One explicit budget for the whole fetch. GetStringAsync reads the body AFTER
+        // the resilience pipeline has returned the headers, so neither Polly's attempt
+        // nor total timeout covers a body that stalls; this linked token does, and it
+        // is passed down so it also bounds the headers phase and the retries.
+        var budget = TimeSpan.FromSeconds(Math.Max(opts.FetchTimeoutSeconds, 1));
+        using var budgetCts = CancellationTokenSource.CreateLinkedTokenSource(ct);
+        budgetCts.CancelAfter(budget);
+
+        string raw;
+        try
+        {
+            raw = await http.GetStringAsync(requestUri, budgetCts.Token);
+        }
+        catch (OperationCanceledException) when (!ct.IsCancellationRequested)
+        {
+            // OUR budget fired (the caller's token is not cancelled): this is a
+            // per-network failure, not a shutdown. Say so with a non-cancellation type
+            // so no "is not OperationCanceledException" filter can mistake it.
+            throw new TimeoutException(
+                $"BlockCypher did not complete the request for '{path}' within {budget.TotalSeconds:0}s.");
+        }
         var dto = JsonSerializer.Deserialize<BlockCypherChainInfoDto>(raw)
             ?? throw new InvalidOperationException($"BlockCypher returned no data for '{path}'.");
 

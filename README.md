@@ -175,6 +175,8 @@ variables (`Database__Provider`, etc. — the compose file shows this).
 | `Database:Provider` | `SqlServer` \| `Sqlite` | Picks the EF Core provider. `Sqlite` needs no Docker; `SqlServer` is what `docker-compose.yml` uses. |
 | `ConnectionStrings:Default` | connection string | For the selected provider. |
 | `BlockCypher:BaseUrl` | URL | BlockCypher API root. |
+| `BlockCypher:FetchTimeoutSeconds` | int, default 45 | Hard budget for one network fetch (headers + body, retries included). A stalled response body counts as that network failing, never as a cancelled batch or a stopped host. |
+| `BlockCypher:RequestsPerSecond` | int, default 3 | Process-wide cap on real HTTP attempts to BlockCypher (retries included), shared by every caller. Excess requests wait in a queue. |
 | `BlockCypher:Token` | string, optional | Free BlockCypher token to raise the anonymous rate limit. Empty = anonymous access. |
 | `Ingestion:Enabled` / `Ingestion:IntervalSeconds` | bool / int | Background ingestion worker on/off and poll interval (default 300s — deliberately modest to respect BlockCypher's rate limits). |
 | `Cors:AllowedOrigins` | string array | Empty = allow any origin (no browser client for this assessment); set to lock down the CORS policy for a real deployment. |
@@ -200,12 +202,14 @@ variables (`Database__Provider`, etc. — the compose file shows this).
   is I/O-bound, not CPU-bound, so PLINQ (built for CPU-bound partitioning) is the wrong tool. Ingestion
   uses a bounded `System.Threading.Channels` producer/consumer with `Parallel.ForEachAsync` and an
   explicit `MaxDegreeOfParallelism`, so concurrency is deliberately bounded rather than an unbounded
-  fan-out that would trip BlockCypher's rate limiter. Note this bounds ONE batch only: it is a
-  concurrency limit, not a rate limit. Several simultaneous `POST /ingest` calls plus the background
-  worker each start their own pipeline with no shared quota; what actually protects the upstream is the
-  HTTP resilience handler (retry with exponential backoff, honoring `Retry-After` on 429) and the
-  300s worker interval. A shared limiter (e.g. one `SemaphoreSlim` or `RateLimiter` in the client) is
-  the next step if multi-caller load mattered. Each parallel branch gets its own DI scope
+  fan-out that would trip BlockCypher's rate limiter. That cap bounds ONE batch only - it is a
+  concurrency limit, not a rate limit. The rate guarantee comes from a process-wide, time-based
+  `TokenBucketRateLimiter` with a one-token bucket (`BlockCypher:RequestsPerSecond`, default 3, so requests are spaced ~333 ms apart) in the HTTP pipeline, placed
+  inside the retry strategy so every real attempt, retries included, takes a permit; all `POST /ingest`
+  calls and the background worker share it, and callers over the budget queue instead of failing.
+  Limits worth stating plainly: it is per process (several replicas would need a distributed limiter,
+  e.g. Redis), and a per-second limit does not enforce BlockCypher's separate hourly quota - that is
+  what the optional token and the 300s worker interval are for. Each parallel branch gets its own DI scope
   (`IServiceScopeFactory`) because `DbContext` isn't thread-safe, and one network failing never aborts
   the others.
 - **Dependency licensing.** Several .NET staples went commercial in 2025–2026; ICMarkets is well above

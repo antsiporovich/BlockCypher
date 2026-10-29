@@ -9,7 +9,7 @@ using MediatR;
 
 namespace ICMarkets.Application.Features.Ingestion;
 
-// Split out of IngestChainCommand so the batch pipeline (IngestAllChainsCommand)
+// Separate from the fetch stage so the batch pipeline (IngestAllChainsCommand)
 // can fetch and persist as separate producer/consumer stages without
 // re-fetching or duplicating the entity-construction/mapping logic.
 // FetchedAt is stamped by the producer the moment the BlockCypher response

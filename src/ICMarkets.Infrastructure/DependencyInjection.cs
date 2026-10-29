@@ -32,28 +32,38 @@ public static class DependencyInjection
         services.AddScoped<IUnitOfWork>(sp => sp.GetRequiredService<AppDbContext>());
 
         services.Configure<BlockCypherOptions>(config.GetSection(BlockCypherOptions.SectionName));
-        services.AddHttpClient<IBlockCypherClient, BlockCypherClient>((sp, c) =>
+        services.AddSingleton<BlockCypherRateLimiter>();
+        var blockCypherClient = services.AddHttpClient<IBlockCypherClient, BlockCypherClient>((sp, c) =>
             {
                 var opts = sp.GetRequiredService<IOptions<BlockCypherOptions>>().Value;
                 c.BaseAddress = new Uri(opts.BaseUrl);
+                // Timeouts are owned by the resilience pipeline and BlockCypherClient's
+                // fetch budget. The built-in HttpClient.Timeout throws a
+                // TaskCanceledException that looks exactly like caller cancellation.
+                c.Timeout = Timeout.InfiniteTimeSpan;
                 c.DefaultRequestHeaders.UserAgent.ParseAdd("ICMarkets-BlockCypher-Assessment/1.0");
-            })
+            });
+
+        // Pipeline order is registration order, outermost first:
+        //   resilience (total timeout -> retry -> breaker -> attempt timeout) -> rate limiter -> network.
+        // The limiter sits INSIDE the retry strategy, so every real attempt - including each
+        // retry of a 429/5xx - takes a permit from the one process-wide budget.
+        blockCypherClient
             .AddStandardResilienceHandler(resilience =>
             {
-                // The standard handler's default predicate already treats 429,
-                // 5xx and timeouts as transient and retries them with jittered
-                // exponential backoff. The one thing it doesn't do by default is
-                // honor a Retry-After header, so wire that in explicitly -
-                // falls back to the computed backoff when the header is absent.
+                // The standard handler's default predicate already treats 429, 5xx and
+                // timeouts as transient and retries them with jittered exponential
+                // backoff - and HttpRetryStrategyOptions.ShouldRetryAfterHeader is true
+                // by default, so a Retry-After header (BOTH delta-seconds and HTTP-date
+                // forms) already sets the retry delay. Deliberately NO custom
+                // DelayGenerator: a hand-rolled one that read only Retry-After.Delta
+                // silently ignored the date form and retried too early.
                 resilience.Retry.MaxRetryAttempts = 3;
                 resilience.Retry.BackoffType = DelayBackoffType.Exponential;
                 resilience.Retry.UseJitter = true;
-                resilience.Retry.DelayGenerator = args =>
-                {
-                    var retryAfter = args.Outcome.Result?.Headers.RetryAfter?.Delta;
-                    return ValueTask.FromResult(retryAfter);
-                };
             });
+        blockCypherClient.AddHttpMessageHandler(sp =>
+            new RateLimitingHandler(sp.GetRequiredService<BlockCypherRateLimiter>().Limiter));
 
         services.Configure<IngestionOptions>(config.GetSection(IngestionOptions.SectionName));
         services.AddHostedService<ChainIngestionWorker>();
