@@ -5,6 +5,12 @@ using MediatR;
 
 namespace ICMarkets.Application.Features.Ingestion;
 
+// shortcut: no API endpoint calls this directly - the assessment only asks
+// for the batch POST /ingest (IngestAllChainsCommand), which fans out per
+// network itself via the Channel pipeline rather than going through this
+// command. Kept for CQRS symmetry with the per-network GetChainHistoryQuery
+// on the read side; not wired to its own endpoint or test since the
+// assessment doesn't require per-network ingest.
 public sealed record IngestChainCommand(Network Network) : IRequest<BlockchainSnapshotDto>;
 
 // Thin: fetch, then delegate persistence to PersistSnapshotCommand so the

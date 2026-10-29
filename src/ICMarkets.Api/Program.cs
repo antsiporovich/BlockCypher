@@ -93,7 +93,10 @@ app.MapOpenApi();
 app.MapScalarApiReference();
 app.UseSwaggerUI(o => o.SwaggerEndpoint("/openapi/v1.json", "v1"));
 
-app.UseHttpsRedirection();
+// shortcut: no UseHttpsRedirection() - the container only listens on
+// HTTP:8080 (see docker-compose/Dockerfile), there's no HTTPS endpoint to
+// redirect to, and keeping the call just logs an ASP0017 warning on every
+// startup for nothing.
 app.UseCors("Default");
 app.MapControllers();
 app.MapHealthChecks("/health");
