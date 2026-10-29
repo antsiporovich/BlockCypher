@@ -1,0 +1,56 @@
+# Image is built locally from src/ICMarkets.Api/Dockerfile and loaded into
+# the cluster (kind/minikube) rather than pulled from a registry - see
+# k8s/README.md. imagePullPolicy: IfNotPresent so a locally-loaded image is
+# used as-is instead of triggering a pull.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: icmarkets-api
+  namespace: icmarkets
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: icmarkets-api
+  template:
+    metadata:
+      labels:
+        app: icmarkets-api
+    spec:
+      containers:
+        - name: api
+          image: icmarkets-api:latest
+          imagePullPolicy: IfNotPresent
+          ports:
+            - containerPort: 8080
+          envFrom:
+            - configMapRef:
+                name: icmarkets-api-config
+            - secretRef:
+                name: icmarkets-api-secrets
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 8080
+            initialDelaySeconds: 15
+            periodSeconds: 10
+            failureThreshold: 10
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: 8080
+            initialDelaySeconds: 30
+            periodSeconds: 15
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: icmarkets-api
+  namespace: icmarkets
+spec:
+  type: ClusterIP
+  selector:
+    app: icmarkets-api
+  ports:
+    - port: 8080
+      targetPort: 8080

@@ -34,6 +34,7 @@ appsettings.*.local.json
 secrets.json
 .env
 *.pfx
+k8s/secret.yaml
 
 ## OS noise
 .DS_Store

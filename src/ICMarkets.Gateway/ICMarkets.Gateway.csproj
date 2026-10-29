@@ -1,0 +1,18 @@
+<Project Sdk="Microsoft.NET.Sdk.Web">
+
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Yarp.ReverseProxy" />
+  </ItemGroup>
+
+  <!-- Yarp.ReverseProxy PackageReference is added by phase9-setup.ps1 via
+       `dotnet add` (Central Package Management) - deliberately NOT
+       pre-written here, same CPM-safety reasoning as
+       tests/ICMarkets.PerformanceTests.csproj (see docs/adr). -->
+
+</Project>

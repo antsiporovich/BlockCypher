@@ -1,0 +1,16 @@
+# Non-secret configuration, mirrors the `environment:` block in
+# docker-compose.yml's `api` service. Secrets (connection string, BlockCypher
+# token) live in secret.example.yaml instead - never put those here.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: icmarkets-api-config
+  namespace: icmarkets
+data:
+  ASPNETCORE_ENVIRONMENT: "Production"
+  Database__Provider: "SqlServer"
+  BlockCypher__BaseUrl: "https://api.blockcypher.com/v1/"
+  Outbox__Enabled: "true"
+  Outbox__HostName: "rabbitmq"
+  Ingestion__Enabled: "true"
+  Ingestion__IntervalSeconds: "300"
