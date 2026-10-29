@@ -7,6 +7,9 @@ A .NET 10 Web API that periodically pulls network summaries for five blockchains
 timestamp, and exposes endpoints that return the stored **history** — newest first — rather than
 proxying BlockCypher live.
 
+📄 **[Solution Overview (PDF)](docs/ICMarkets-BlockCypher-Solution-Overview.pdf)** — a narrative walkthrough
+of the design for reviewers who'd rather read a summary than trace it through the code.
+
 ## Quick start — Docker (recommended, no .NET SDK needed)
 
 ```bash
