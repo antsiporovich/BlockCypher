@@ -81,7 +81,37 @@ namespace ICMarkets.Infrastructure.Migrations
                     b.HasIndex("Network", "CreatedAt")
                         .IsDescending(false, true);
 
-                    b.ToTable("Snapshots", (string)null);
+                    b.ToTable("Snapshots");
+                });
+
+            modelBuilder.Entity("ICMarkets.Infrastructure.Messaging.OutboxMessage", b =>
+                {
+                    b.Property<long>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("bigint");
+
+                    SqlServerPropertyBuilderExtensions.UseIdentityColumn(b.Property<long>("Id"));
+
+                    b.Property<DateTimeOffset>("OccurredAt")
+                        .HasColumnType("datetimeoffset");
+
+                    b.Property<string>("Payload")
+                        .IsRequired()
+                        .HasColumnType("nvarchar(max)");
+
+                    b.Property<DateTimeOffset?>("ProcessedAt")
+                        .HasColumnType("datetimeoffset");
+
+                    b.Property<string>("Type")
+                        .IsRequired()
+                        .HasMaxLength(200)
+                        .HasColumnType("nvarchar(200)");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("ProcessedAt");
+
+                    b.ToTable("Outbox");
                 });
 
             modelBuilder.Entity("ICMarkets.Domain.Entities.BlockchainSnapshot", b =>
@@ -105,7 +135,7 @@ namespace ICMarkets.Infrastructure.Migrations
 
                             b1.HasKey("BlockchainSnapshotId");
 
-                            b1.ToTable("Snapshots", (string)null);
+                            b1.ToTable("Snapshots");
 
                             b1.WithOwner()
                                 .HasForeignKey("BlockchainSnapshotId");
@@ -146,7 +176,7 @@ namespace ICMarkets.Infrastructure.Migrations
 
                             b1.HasKey("BlockchainSnapshotId");
 
-                            b1.ToTable("Snapshots", (string)null);
+                            b1.ToTable("Snapshots");
 
                             b1.WithOwner()
                                 .HasForeignKey("BlockchainSnapshotId");

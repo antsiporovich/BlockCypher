@@ -1,7 +1,9 @@
+using System.Text.Json;
 using ICMarkets.Application.Abstractions;
 using ICMarkets.Domain;
 using ICMarkets.Domain.Entities;
 using ICMarkets.Domain.Events;
+using ICMarkets.Infrastructure.Messaging;
 using MediatR;
 using Microsoft.EntityFrameworkCore;
 
@@ -11,6 +13,7 @@ public class AppDbContext(DbContextOptions<AppDbContext> options, IPublisher pub
     : DbContext(options), IUnitOfWork
 {
     public DbSet<BlockchainSnapshot> Snapshots => Set<BlockchainSnapshot>();
+    public DbSet<OutboxMessage> Outbox => Set<OutboxMessage>();
 
     protected override void OnModelCreating(ModelBuilder modelBuilder)
     {
@@ -55,6 +58,16 @@ public class AppDbContext(DbContextOptions<AppDbContext> options, IPublisher pub
                 gp.Property(g => g.LowPriorityFee).HasColumnName("LowPriorityFee");
             });
         });
+
+        modelBuilder.Entity<OutboxMessage>(b =>
+        {
+            b.Property(m => m.Type).IsRequired().HasMaxLength(200);
+            b.Property(m => m.Payload).IsRequired();
+            // never ordered/compared in SQL (OutboxPublisherWorker orders by
+            // Id), so no SQLite DateTimeOffset conversion needed here, unlike
+            // BlockchainSnapshot.CreatedAt above.
+            b.HasIndex(m => m.ProcessedAt);
+        });
     }
 
     // dispatches domain events raised on tracked entities after a successful
@@ -65,6 +78,20 @@ public class AppDbContext(DbContextOptions<AppDbContext> options, IPublisher pub
         var pendingEvents = ChangeTracker.Entries<BlockchainSnapshot>()
             .SelectMany(e => e.Entity.DomainEvents)
             .ToList();
+
+        // Transactional outbox: the row is added to the SAME SaveChanges call
+        // as the snapshot that raised the event, so both commit together or
+        // neither does - see OutboxMessage for why that matters.
+        foreach (var domainEvent in pendingEvents)
+        {
+            if (domainEvent is SnapshotIngested ingested)
+            {
+                Outbox.Add(OutboxMessage.Create(
+                    type: nameof(SnapshotIngested),
+                    payload: JsonSerializer.Serialize(ingested),
+                    occurredAt: ingested.CreatedAt));
+            }
+        }
 
         var result = await base.SaveChangesAsync(ct);
 
