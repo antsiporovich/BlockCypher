@@ -28,6 +28,35 @@ services:
       Database__Provider: "SqlServer"
       ConnectionStrings__Default: "Server=db,1433;Database=BlockCypher;User Id=sa;Password=My_Strong_Pass123!;TrustServerCertificate=True;Encrypt=True"
       BlockCypher__BaseUrl: "https://api.blockcypher.com/v1/"
+      # optional: anonymous BlockCypher access is rate-limited (429 "Limits
+      # reached" once the quota is used up, honored via Retry-After by the
+      # resilience handler in Infrastructure/DependencyInjection.cs). Set a
+      # free token (https://accounts.blockcypher.com/) in the host shell
+      # before `docker compose up` to raise the limit - unset/empty keeps
+      # anonymous access, same as before.
+      BlockCypher__Token: "${BlockCypher__Token:-}"
+
+  prometheus:
+    build:
+      context: ./observability/prometheus
+      dockerfile: Dockerfile
+    ports:
+      - "9090:9090"
+    depends_on:
+      - api
+
+  grafana:
+    build:
+      context: ./observability/grafana
+      dockerfile: Dockerfile
+    environment:
+      GF_SECURITY_ADMIN_PASSWORD: admin
+      GF_AUTH_ANONYMOUS_ENABLED: "true"
+      GF_AUTH_ANONYMOUS_ORG_ROLE: Viewer
+    ports:
+      - "3000:3000"
+    depends_on:
+      - prometheus
 
 volumes:
   mssql-data:

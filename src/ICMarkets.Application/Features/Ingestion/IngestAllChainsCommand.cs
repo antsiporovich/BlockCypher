@@ -1,7 +1,9 @@
 using System.Collections.Concurrent;
+using System.Diagnostics;
 using System.Threading.Channels;
 using ICMarkets.Application.Abstractions;
 using ICMarkets.Application.Dtos;
+using ICMarkets.Application.Telemetry;
 using ICMarkets.Domain;
 using MediatR;
 using Microsoft.Extensions.DependencyInjection;
@@ -44,6 +46,9 @@ public sealed class IngestAllChainsCommandHandler(
 
     public async Task<IngestAllChainsResult> Handle(IngestAllChainsCommand request, CancellationToken ct)
     {
+        using var activity = IngestionTelemetry.ActivitySource.StartActivity("ingest-all-chains");
+        activity?.SetTag("icmarkets.network_count", Enum.GetValues<Network>().Length);
+
         var channel = Channel.CreateBounded<FetchedChain>(new BoundedChannelOptions(ChannelCapacity)
         {
             SingleReader = true,
@@ -55,6 +60,9 @@ public sealed class IngestAllChainsCommandHandler(
         var producing = ProduceAsync(channel.Writer, failures, ct);
         var succeeded = await ConsumeAsync(channel.Reader, failures, ct);
         await producing; // surfaces a producer-level exception (e.g. cancellation) to the caller
+
+        activity?.SetTag("icmarkets.succeeded_count", succeeded.Count);
+        activity?.SetTag("icmarkets.failed_count", failures.Count);
 
         return new IngestAllChainsResult(succeeded, failures.ToList());
     }
@@ -79,6 +87,12 @@ public sealed class IngestAllChainsCommandHandler(
                     // this client becoming scoped/stateful surprising someone.
                     using var scope = scopeFactory.CreateScope();
                     var client = scope.ServiceProvider.GetRequiredService<IBlockCypherClient>();
+                    var networkKey = NetworkKey.ToKey(network);
+
+                    using var fetchActivity = IngestionTelemetry.ActivitySource.StartActivity("fetch-chain-info");
+                    fetchActivity?.SetTag("icmarkets.network", networkKey);
+
+                    var stopwatch = Stopwatch.StartNew();
                     try
                     {
                         var result = await client.GetChainInfoAsync(network, token);
@@ -88,6 +102,11 @@ public sealed class IngestAllChainsCommandHandler(
                     {
                         logger.LogWarning(ex, "Fetch failed for {Network}", network);
                         failures.Add(new IngestFailure(network, ex.Message));
+                        IngestionTelemetry.IngestionFailures.Add(1, IngestionTelemetry.NetworkTag(networkKey));
+                    }
+                    finally
+                    {
+                        IngestionTelemetry.FetchDuration.Record(stopwatch.Elapsed.TotalMilliseconds, IngestionTelemetry.NetworkTag(networkKey));
                     }
                 });
         }
@@ -122,6 +141,7 @@ public sealed class IngestAllChainsCommandHandler(
             {
                 logger.LogWarning(ex, "Persist failed for {Network}", item.Network);
                 failures.Add(new IngestFailure(item.Network, ex.Message));
+                IngestionTelemetry.IngestionFailures.Add(1, IngestionTelemetry.NetworkTag(NetworkKey.ToKey(item.Network)));
             }
         }
 

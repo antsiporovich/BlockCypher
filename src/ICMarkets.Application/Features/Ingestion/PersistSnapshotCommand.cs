@@ -1,6 +1,7 @@
 using ICMarkets.Application.Abstractions;
 using ICMarkets.Application.Dtos;
 using ICMarkets.Application.Mapping;
+using ICMarkets.Application.Telemetry;
 using ICMarkets.Domain;
 using ICMarkets.Domain.Entities;
 using ICMarkets.Domain.ValueObjects;
@@ -21,6 +22,10 @@ public sealed class PersistSnapshotCommandHandler(
 {
     public async Task<BlockchainSnapshotDto> Handle(PersistSnapshotCommand request, CancellationToken ct)
     {
+        using var activity = IngestionTelemetry.ActivitySource.StartActivity("persist-snapshot");
+        var networkKey = NetworkKey.ToKey(request.Network);
+        activity?.SetTag("icmarkets.network", networkKey);
+
         var info = request.Result.Dto;
 
         FeeRates? feeRates = info.HighFeePerKb is not null || info.MediumFeePerKb is not null || info.LowFeePerKb is not null
@@ -53,6 +58,9 @@ public sealed class PersistSnapshotCommandHandler(
 
         await repo.AddAsync(snapshot, ct);
         await unitOfWork.SaveChangesAsync(ct);
+
+        IngestionTelemetry.SnapshotsIngested.Add(1, IngestionTelemetry.NetworkTag(networkKey));
+
         return mapper.ToDto(snapshot);
     }
 }

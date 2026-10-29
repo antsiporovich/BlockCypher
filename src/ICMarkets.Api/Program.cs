@@ -1,22 +1,32 @@
 using System.Text.Json.Serialization;
+using Elastic.CommonSchema.Serilog;
 using ICMarkets.Api.Infrastructure;
 using ICMarkets.Application;
+using ICMarkets.Application.Telemetry;
 using ICMarkets.Infrastructure;
 using ICMarkets.Infrastructure.Persistence;
 using Microsoft.EntityFrameworkCore;
+using OpenTelemetry.Metrics;
+using OpenTelemetry.Resources;
+using OpenTelemetry.Trace;
 using Scalar.AspNetCore;
 using Serilog;
+using Serilog.Enrichers.Span;
 
 var builder = WebApplication.CreateBuilder(args);
 
-// Serilog replaces the default MEL console logger; ReadFrom.Configuration lets a
-// "Serilog" appsettings section (sinks, levels, enrichers - e.g. the Elastic Common
-// Schema formatter in a later phase) take over without another code change.
+// Serilog replaces the default MEL console logger. The Elastic Common Schema
+// formatter (~15 min to wire) makes the console output Kibana-ingestible by
+// construction - a named requirement in the posting - without standing up an
+// ELK stack for an assessment. Enrich.WithSpan() adds the active trace/span
+// id to every log line so a log can be correlated back to the OTel trace
+// that produced it.
 builder.Host.UseSerilog((context, services, configuration) => configuration
     .ReadFrom.Configuration(context.Configuration)
     .ReadFrom.Services(services)
     .Enrich.FromLogContext()
-    .WriteTo.Console());
+    .Enrich.WithSpan()
+    .WriteTo.Console(new EcsTextFormatter()));
 
 builder.Services.AddControllers()
     .AddJsonOptions(o =>
@@ -30,6 +40,33 @@ builder.Services.AddOpenApi();
 builder.Services.AddApplication();
 builder.Services.AddInfrastructure(builder.Configuration);
 builder.Services.AddSingleton(TimeProvider.System);
+
+// OTLP export is opt-in via config/env (OTEL_EXPORTER_OTLP_ENDPOINT or
+// OpenTelemetry:OtlpEndpoint) - without a collector configured, traces still
+// flow through the pipeline (visible to e.g. an in-process listener or a
+// future exporter) but nothing attempts a network call to a backend that
+// doesn't exist in this compose stack.
+var otlpEndpoint = builder.Configuration["OpenTelemetry:OtlpEndpoint"];
+
+builder.Services.AddOpenTelemetry()
+    .ConfigureResource(resource => resource.AddService("ICMarkets.BlockCypherApi"))
+    .WithTracing(tracing =>
+    {
+        tracing
+            .AddSource(IngestionTelemetry.ActivitySourceName)
+            .AddAspNetCoreInstrumentation()
+            .AddHttpClientInstrumentation()
+            .AddEntityFrameworkCoreInstrumentation();
+
+        if (!string.IsNullOrWhiteSpace(otlpEndpoint))
+            tracing.AddOtlpExporter(o => o.Endpoint = new Uri(otlpEndpoint));
+    })
+    .WithMetrics(metrics => metrics
+        .AddMeter(IngestionTelemetry.MeterName)
+        .AddAspNetCoreInstrumentation()
+        .AddHttpClientInstrumentation()
+        // /metrics below - scraped by the Prometheus service in docker-compose.
+        .AddPrometheusExporter());
 
 var corsOrigins = builder.Configuration.GetSection("Cors:AllowedOrigins").Get<string[]>() ?? [];
 builder.Services.AddCors(options => options.AddPolicy("Default", policy =>
@@ -60,6 +97,7 @@ app.UseHttpsRedirection();
 app.UseCors("Default");
 app.MapControllers();
 app.MapHealthChecks("/health");
+app.MapPrometheusScrapingEndpoint(); // GET /metrics
 
 // migrations on SQL Server, EnsureCreated on the SQLite no-Docker path
 // (documented compromise - see docs/DECISIONS.md)
