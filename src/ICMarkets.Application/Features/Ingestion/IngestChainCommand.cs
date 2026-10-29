@@ -18,11 +18,12 @@ public sealed record IngestChainCommand(Network Network) : IRequest<BlockchainSn
 // the batch pipeline in IngestAllChainsCommandHandler.
 public sealed class IngestChainCommandHandler(
     IBlockCypherClient client,
-    ISender sender) : IRequestHandler<IngestChainCommand, BlockchainSnapshotDto>
+    ISender sender,
+    TimeProvider clock) : IRequestHandler<IngestChainCommand, BlockchainSnapshotDto>
 {
     public async Task<BlockchainSnapshotDto> Handle(IngestChainCommand request, CancellationToken ct)
     {
         var result = await client.GetChainInfoAsync(request.Network, ct);
-        return await sender.Send(new PersistSnapshotCommand(request.Network, result), ct);
+        return await sender.Send(new PersistSnapshotCommand(request.Network, result, clock.GetUtcNow()), ct);
     }
 }

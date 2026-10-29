@@ -51,10 +51,10 @@ public sealed class BlockchainRepositoryIntegrationTests : IAsyncLifetime
         await _db.DisposeAsync();
     }
 
-    [Fact]
+    [SkippableFact]
     public async Task AddAsync_ThenSaveChanges_PersistsTheSnapshot_AndRoundTripsRawJsonAndNullableColumns()
     {
-        if (!_fixture.IsAvailable) return;
+        Skip.IfNot(_fixture.IsAvailable, _fixture.UnavailableReason);
 
         var createdAt = new DateTimeOffset(2026, 1, 1, 0, 0, 0, TimeSpan.Zero);
         var snapshot = BlockchainSnapshot.Create(
@@ -88,10 +88,10 @@ public sealed class BlockchainRepositoryIntegrationTests : IAsyncLifetime
         reloaded.LastForkHeight.Should().Be(969888);
     }
 
-    [Fact]
+    [SkippableFact]
     public async Task GetHistoryAsync_OrdersByCreatedAtDescending()
     {
-        if (!_fixture.IsAvailable) return;
+        Skip.IfNot(_fixture.IsAvailable, _fixture.UnavailableReason);
 
         var t0 = new DateTimeOffset(2026, 1, 1, 0, 0, 0, TimeSpan.Zero);
         await AddSnapshot(Network.EthMain, t0.AddMinutes(10));
@@ -104,10 +104,10 @@ public sealed class BlockchainRepositoryIntegrationTests : IAsyncLifetime
         history.Select(s => s.CreatedAt).Should().Equal(t0.AddMinutes(30), t0.AddMinutes(20), t0.AddMinutes(10));
     }
 
-    [Fact]
+    [SkippableFact]
     public async Task GetHistoryAsync_HonoursTakeAndSkip_ForPagination()
     {
-        if (!_fixture.IsAvailable) return;
+        Skip.IfNot(_fixture.IsAvailable, _fixture.UnavailableReason);
 
         var t0 = new DateTimeOffset(2026, 1, 1, 0, 0, 0, TimeSpan.Zero);
         for (var i = 0; i < 5; i++)
@@ -120,10 +120,10 @@ public sealed class BlockchainRepositoryIntegrationTests : IAsyncLifetime
         page.Select(s => s.CreatedAt).Should().Equal(t0.AddMinutes(3), t0.AddMinutes(2));
     }
 
-    [Fact]
+    [SkippableFact]
     public async Task GetLatestAsync_ReturnsTheMostRecentRow_PerNetwork()
     {
-        if (!_fixture.IsAvailable) return;
+        Skip.IfNot(_fixture.IsAvailable, _fixture.UnavailableReason);
 
         var t0 = new DateTimeOffset(2026, 1, 1, 0, 0, 0, TimeSpan.Zero);
         await AddSnapshot(Network.BtcMain, t0.AddMinutes(5));
@@ -138,10 +138,10 @@ public sealed class BlockchainRepositoryIntegrationTests : IAsyncLifetime
         latest.Network.Should().Be(Network.BtcMain);
     }
 
-    [Fact]
+    [SkippableFact]
     public async Task GetLatestAsync_ReturnsNull_WhenNoRowsForThatNetwork()
     {
-        if (!_fixture.IsAvailable) return;
+        Skip.IfNot(_fixture.IsAvailable, _fixture.UnavailableReason);
 
         var latest = await _repo!.GetLatestAsync(Network.DashMain, CancellationToken.None);
 

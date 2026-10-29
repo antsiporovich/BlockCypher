@@ -5,7 +5,6 @@ using ICMarkets.Application.Features.Ingestion;
 using ICMarkets.Application.Mapping;
 using ICMarkets.Domain;
 using ICMarkets.Domain.Entities;
-using Microsoft.Extensions.Time.Testing;
 using NSubstitute;
 
 namespace ICMarkets.UnitTests.Features.Ingestion;
@@ -19,8 +18,8 @@ public sealed class PersistSnapshotCommandHandlerTests
     [Fact]
     public async Task Handle_BtcChainInfo_PersistsFeeRates_AndLeavesGasPricesNull()
     {
-        var clock = new FakeTimeProvider(new DateTimeOffset(2026, 1, 1, 12, 0, 0, TimeSpan.Zero));
-        var handler = new PersistSnapshotCommandHandler(_repo, _unitOfWork, clock, _mapper);
+        var fetchedAt = new DateTimeOffset(2026, 1, 1, 12, 0, 0, TimeSpan.Zero);
+        var handler = new PersistSnapshotCommandHandler(_repo, _unitOfWork, _mapper);
         var info = new BlockCypherChainInfoDto
         {
             Name = "BTC.main",
@@ -38,21 +37,41 @@ public sealed class PersistSnapshotCommandHandlerTests
         _repo.AddAsync(Arg.Do<BlockchainSnapshot>(s => captured = s), Arg.Any<CancellationToken>())
             .Returns(Task.CompletedTask);
 
-        var dto = await handler.Handle(new PersistSnapshotCommand(Network.BtcMain, new ChainInfoResult(info, "{}")), CancellationToken.None);
+        var dto = await handler.Handle(new PersistSnapshotCommand(Network.BtcMain, new ChainInfoResult(info, "{}"), fetchedAt), CancellationToken.None);
 
         captured.Should().NotBeNull();
         captured!.FeeRates.Should().NotBeNull();
         captured.GasPrices.Should().BeNull();
-        captured.CreatedAt.Should().Be(clock.GetUtcNow());
-        dto.CreatedAt.Should().Be(clock.GetUtcNow());
+        captured.CreatedAt.Should().Be(fetchedAt);
+        dto.CreatedAt.Should().Be(fetchedAt);
         await _unitOfWork.Received(1).SaveChangesAsync(Arg.Any<CancellationToken>());
+    }
+
+    [Fact]
+    public async Task Handle_CreatedAt_IsTheFetchTimeFromTheCommand_NotTheMomentOfPersisting()
+    {
+        // a response that waited in the channel is persisted long after it was
+        // fetched - CreatedAt must still be the (much earlier) fetch time.
+        var fetchedAt = new DateTimeOffset(2020, 5, 17, 8, 30, 0, TimeSpan.Zero);
+        var handler = new PersistSnapshotCommandHandler(_repo, _unitOfWork, _mapper);
+        var info = new BlockCypherChainInfoDto { Name = "BTC.main", Height = 1, Hash = "h", Time = fetchedAt, HighFeePerKb = 1, MediumFeePerKb = 1, LowFeePerKb = 1 };
+
+        BlockchainSnapshot? captured = null;
+        _repo.AddAsync(Arg.Do<BlockchainSnapshot>(x => captured = x), Arg.Any<CancellationToken>())
+            .Returns(Task.CompletedTask);
+
+        var dto = await handler.Handle(new PersistSnapshotCommand(Network.BtcMain, new ChainInfoResult(info, "{}"), fetchedAt), CancellationToken.None);
+
+        captured!.CreatedAt.Should().Be(fetchedAt);
+        dto.CreatedAt.Should().Be(fetchedAt);
+        captured.CreatedAt.Should().BeBefore(DateTimeOffset.UtcNow.AddYears(-1));
     }
 
     [Fact]
     public async Task Handle_EthChainInfo_PersistsGasPrices_AndLeavesFeeRatesNull()
     {
-        var clock = new FakeTimeProvider(new DateTimeOffset(2026, 1, 1, 12, 0, 0, TimeSpan.Zero));
-        var handler = new PersistSnapshotCommandHandler(_repo, _unitOfWork, clock, _mapper);
+        var fetchedAt = new DateTimeOffset(2026, 1, 1, 12, 0, 0, TimeSpan.Zero);
+        var handler = new PersistSnapshotCommandHandler(_repo, _unitOfWork, _mapper);
         var info = new BlockCypherChainInfoDto
         {
             Name = "ETH.main",
@@ -69,7 +88,7 @@ public sealed class PersistSnapshotCommandHandlerTests
         _repo.AddAsync(Arg.Do<BlockchainSnapshot>(s => captured = s), Arg.Any<CancellationToken>())
             .Returns(Task.CompletedTask);
 
-        await handler.Handle(new PersistSnapshotCommand(Network.EthMain, new ChainInfoResult(info, "{}")), CancellationToken.None);
+        await handler.Handle(new PersistSnapshotCommand(Network.EthMain, new ChainInfoResult(info, "{}"), fetchedAt), CancellationToken.None);
 
         captured.Should().NotBeNull();
         captured!.GasPrices.Should().NotBeNull();
@@ -81,15 +100,15 @@ public sealed class PersistSnapshotCommandHandlerTests
     {
         // e.g. an upstream response missing both families entirely - neither
         // value object should be fabricated as all-null.
-        var clock = new FakeTimeProvider(DateTimeOffset.UtcNow);
-        var handler = new PersistSnapshotCommandHandler(_repo, _unitOfWork, clock, _mapper);
+        var fetchedAt = DateTimeOffset.UtcNow;
+        var handler = new PersistSnapshotCommandHandler(_repo, _unitOfWork, _mapper);
         var info = new BlockCypherChainInfoDto { Name = "X", Height = 1, Hash = "h", Time = DateTimeOffset.UtcNow };
 
         BlockchainSnapshot? captured = null;
         _repo.AddAsync(Arg.Do<BlockchainSnapshot>(s => captured = s), Arg.Any<CancellationToken>())
             .Returns(Task.CompletedTask);
 
-        await handler.Handle(new PersistSnapshotCommand(Network.DashMain, new ChainInfoResult(info, "{}")), CancellationToken.None);
+        await handler.Handle(new PersistSnapshotCommand(Network.DashMain, new ChainInfoResult(info, "{}"), fetchedAt), CancellationToken.None);
 
         captured!.FeeRates.Should().BeNull();
         captured.GasPrices.Should().BeNull();

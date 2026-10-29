@@ -12,12 +12,17 @@ namespace ICMarkets.Application.Features.Ingestion;
 // Split out of IngestChainCommand so the batch pipeline (IngestAllChainsCommand)
 // can fetch and persist as separate producer/consumer stages without
 // re-fetching or duplicating the entity-construction/mapping logic.
-public sealed record PersistSnapshotCommand(Network Network, ChainInfoResult Result) : IRequest<BlockchainSnapshotDto>;
+// FetchedAt is stamped by the producer the moment the BlockCypher response
+// arrives and becomes the snapshot's CreatedAt. This handler deliberately does
+// NOT read the clock: under backpressure a fetched response can wait in the
+// Channel before it is persisted, and CreatedAt must reflect when the data was
+// fetched, not when the row happened to be written.
+public sealed record PersistSnapshotCommand(Network Network, ChainInfoResult Result, DateTimeOffset FetchedAt)
+    : IRequest<BlockchainSnapshotDto>;
 
 public sealed class PersistSnapshotCommandHandler(
     IBlockchainRepository repo,
     IUnitOfWork unitOfWork,
-    TimeProvider clock,
     SnapshotMapper mapper) : IRequestHandler<PersistSnapshotCommand, BlockchainSnapshotDto>
 {
     public async Task<BlockchainSnapshotDto> Handle(PersistSnapshotCommand request, CancellationToken ct)
@@ -54,7 +59,7 @@ public sealed class PersistSnapshotCommandHandler(
             lastForkHeight: info.LastForkHeight,
             lastForkHash: info.LastForkHash,
             rawJson: request.Result.RawJson,
-            createdAt: clock.GetUtcNow());
+            createdAt: request.FetchedAt);
 
         await repo.AddAsync(snapshot, ct);
         await unitOfWork.SaveChangesAsync(ct);

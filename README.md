@@ -105,7 +105,8 @@ Infrastructure or Api.
 | `GET` | `/api/v1/blockchains/{network}/history?take=50&skip=0` | Stored snapshots for one network, `CreatedAt` descending. |
 | `GET` | `/api/v1/blockchains/{network}/latest` | Most recently stored snapshot for one network. `404` if nothing has been ingested yet. |
 | `GET` | `/api/v1/blockchains/networks` | The network keys this API accepts (`btc-main`, `eth-main`, `dash-main`, `btc-test3`, `ltc-main`). |
-| `GET` | `/health` | Liveness/readiness, including a DB connectivity check. |
+| `GET` | `/health` | Full health, including a DB connectivity check. |
+| `GET` | `/health/live`, `/health/ready` | Kubernetes probes: liveness never touches the DB (a DB outage must not restart a healthy API); readiness includes the DB check. |
 | `GET` | `/metrics` | Prometheus scrape endpoint (ingestion counters, fetch-duration histogram). |
 
 A background worker also calls the same ingestion pipeline on a timer (`Ingestion:IntervalSeconds` in
@@ -123,8 +124,14 @@ ingested response:
   value objects — exactly one of the two is populated per network family.
 - `RawJson` — the complete BlockCypher response, stored as provided, so nothing captured by the typed
   columns is ever lost.
-- `CreatedAt` (`DateTimeOffset`, UTC) — set from an injected `TimeProvider` at the moment the fetch
-  completes, **not** `DateTime.UtcNow` (keeps it deterministic and testable). History is always
+- `RawJson` is only stored for a **valid** response: an HTTP 200 whose body is empty (`{}`), an error
+  object, or another network's data (wrong name, wrong fee/gas family, missing `time`) is rejected in
+  `BlockCypherClient` and reported in `failed`, never persisted as a snapshot of default values.
+- `CreatedAt` (`DateTimeOffset`, UTC) — the **fetch** time: stamped by the ingestion producer from an
+  injected `TimeProvider` right after the BlockCypher response arrives and carried through the channel
+  as `FetchedAt`. It is deliberately **not** read when the row is persisted — under backpressure a
+  fetched response can wait in the queue, and the history should show when the data was observed, not
+  when it was written. Not `DateTime.UtcNow`, so it stays deterministic and testable. History is always
   returned ordered `CreatedAt DESC`, with `Id DESC` as a tiebreaker for same-timestamp rows, backed by
   a composite `(Network, CreatedAt DESC)` index.
 
@@ -143,15 +150,18 @@ dotnet run -c Release --project tests/ICMarkets.PerformanceTests       # Benchma
 - **Unit** (`tests/ICMarkets.UnitTests`) — command/query handlers, validators, the Mapperly mapper and
   BlockCypher JSON deserialization, with NSubstitute doubles for `IBlockCypherClient`/`ISender`.
 - **Integration** (`tests/ICMarkets.IntegrationTests`) — the repository and EF Core migrations against a
-  **real SQL Server** container via Testcontainers.MsSql (one shared container per test assembly, skips
-  gracefully if Docker isn't available). Testing only on SQLite would hide real SQL Server behaviour
+  **real SQL Server** container via Testcontainers.MsSql (one shared container per test assembly). Without
+  Docker the SQL Server tests are reported as **Skipped** with a reason, never as Passed; in CI
+  `REQUIRE_SQLSERVER=1` turns an unavailable container into a failure instead. Testing only on SQLite would hide real SQL Server behaviour
   (identity columns, `DateTime2` precision, collation, index usage).
 - **Functional** (`tests/ICMarkets.FunctionalTests`) — full HTTP pipeline via `WebApplicationFactory`,
   SQLite in-memory for speed, and **WireMock.Net** stubbing BlockCypher so the suite is fast,
   deterministic, offline, and never hits the live API's rate limits.
 - **Performance** (`tests/ICMarkets.PerformanceTests`) — BenchmarkDotNet micro-benchmarks on the mapping
   and query-handler paths. Deliberately outside the `.slnx` and `dotnet test`/CI — it's a profiling
-  tool, not a pass/fail gate; run it manually with `dotnet run -c Release`.
+  tool, not a pass/fail gate; run it manually with `dotnet run -c Release`. These are
+  microbenchmarks of in-process code (mapping, handlers over a stubbed repository); they say nothing
+  about end-to-end throughput, which would be dominated by BlockCypher latency and the database.
 - `TimeProvider` is injected everywhere `CreatedAt` is set, so ordering assertions are deterministic
   instead of racing the system clock.
 
@@ -190,7 +200,12 @@ variables (`Database__Provider`, etc. — the compose file shows this).
   is I/O-bound, not CPU-bound, so PLINQ (built for CPU-bound partitioning) is the wrong tool. Ingestion
   uses a bounded `System.Threading.Channels` producer/consumer with `Parallel.ForEachAsync` and an
   explicit `MaxDegreeOfParallelism`, so concurrency is deliberately bounded rather than an unbounded
-  fan-out that would trip BlockCypher's rate limiter. Each parallel branch gets its own DI scope
+  fan-out that would trip BlockCypher's rate limiter. Note this bounds ONE batch only: it is a
+  concurrency limit, not a rate limit. Several simultaneous `POST /ingest` calls plus the background
+  worker each start their own pipeline with no shared quota; what actually protects the upstream is the
+  HTTP resilience handler (retry with exponential backoff, honoring `Retry-After` on 429) and the
+  300s worker interval. A shared limiter (e.g. one `SemaphoreSlim` or `RateLimiter` in the client) is
+  the next step if multi-caller load mattered. Each parallel branch gets its own DI scope
   (`IServiceScopeFactory`) because `DbContext` isn't thread-safe, and one network failing never aborts
   the others.
 - **Dependency licensing.** Several .NET staples went commercial in 2025–2026; ICMarkets is well above
@@ -211,6 +226,24 @@ variables (`Database__Provider`, etc. — the compose file shows this).
   `CreatedAt` is set once, at fetch time, and every read endpoint queries the database, never BlockCypher
   directly. This is also what makes the functional tests fast, deterministic and independent of
   BlockCypher's availability or rate limits (WireMock stands in for BlockCypher there).
+- **Messaging: at-least-once, not exactly-once.** `SnapshotIngested` is written to an outbox table in the
+  same transaction as the snapshot, then drained to RabbitMQ by `OutboxPublisherWorker`. The delivery
+  contract, and what enforces it:
+  - A row is marked processed only after the broker has **confirmed** the message — the channel uses
+    publisher confirms with tracking, so `BasicPublishAsync` completes on the broker's ack, not when bytes
+    reach the socket — and a nack throws.
+  - Publishes are `mandatory` against a fanout exchange: a message no queue can receive is returned by the
+    broker and surfaces as an exception, so the row stays unprocessed instead of being "delivered" into
+    nothing. For the demo a durable, TTL/length-bounded queue is declared and bound
+    (`Outbox:Queue`, empty = declare nothing and let real consumers bind their own).
+  - Messages are `Persistent` (with a durable queue they survive a broker restart) and carry
+    `MessageId` = the outbox row id, stable across retries.
+  - Broker down, nack or unroutable → the row stays unprocessed and is retried on the next tick. Each row
+    is saved as soon as it is confirmed, so a failure later in a batch does not re-publish confirmed rows.
+  - The remaining duplicate window — a crash between the broker's ack and saving `ProcessedAt` — is
+    closed on the consumer side: **consumers must be idempotent on `MessageId`.** No exactly-once claim.
+  - Staging a row is idempotent within a unit of work: a failed-then-retried `SaveChanges` does not
+    produce two outbox rows for one snapshot.
 
 ## Requirement coverage
 
@@ -255,8 +288,12 @@ this became, while every route currently lives on one.
   need a second environment switch just to see the API docs; a real deployment would gate
   `MapOpenApi`/`MapScalarApiReference`/`UseSwaggerUI` behind `app.Environment.IsDevelopment()` or a
   feature flag.
+- **Read path loads `RawJson`** — `GetHistory`/`GetLatest` materialize the full entity, including the
+  large `RawJson` audit column, and the mapper then drops it. A server-side projection straight to the DTO
+  would avoid that; negligible at this row size, so it is noted rather than done.
 - **Outbox retention** — `OutboxPublisherWorker` purges processed rows older than
   `Outbox:RetentionHours` (default 24h) on every tick, and the table is never written to at all while
-  `Outbox:Enabled` is false (the default local/SQLite path), so it stays bounded in both modes.
+  `Outbox:Enabled` is false (the default local/SQLite path), so it stays bounded in both modes. The purge
+  runs on SQLite too (`ProcessedAt` is stored as UTC ticks there so the comparison translates).
 
 See `docs/adr/` for the fuller reasoning behind the choices above.

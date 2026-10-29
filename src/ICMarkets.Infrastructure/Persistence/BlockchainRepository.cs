@@ -22,6 +22,11 @@ public class BlockchainRepository(AppDbContext db) : IBlockchainRepository
     // Served by the (Network, CreatedAt DESC) index; SQL Server appends the clustered
     // PK (Id) to the nonclustered index, so the Id tiebreaker is covered too.
     // AsNoTracking: these are read-only query paths, no change tracking needed.
+    // Known optimization (not done): these queries materialize the whole entity,
+    // including the large RawJson column, which the mapper then discards. A
+    // server-side Select into the DTO would skip it; negligible for rows this
+    // small, and it would move DTO shaping into the repository, so it is left
+    // as a documented trade-off (see README, Known limitations).
     public async Task<List<BlockchainSnapshot>> GetHistoryAsync(Network network, int take, int skip, CancellationToken ct) =>
         await db.Snapshots
             .AsNoTracking()

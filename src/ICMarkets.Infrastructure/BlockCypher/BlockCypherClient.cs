@@ -6,7 +6,7 @@ using Microsoft.Extensions.Options;
 
 namespace ICMarkets.Infrastructure.BlockCypher;
 
-public class BlockCypherClient(HttpClient http, IOptions<BlockCypherOptions> options) : IBlockCypherClient
+public class BlockCypherClient(HttpClient http, IOptions<BlockCypherOptions> options, TimeProvider clock) : IBlockCypherClient
 {
     public async Task<ChainInfoResult> GetChainInfoAsync(Network network, CancellationToken ct)
     {
@@ -19,6 +19,10 @@ public class BlockCypherClient(HttpClient http, IOptions<BlockCypherOptions> opt
         var raw = await http.GetStringAsync(requestUri, ct);
         var dto = JsonSerializer.Deserialize<BlockCypherChainInfoDto>(raw)
             ?? throw new InvalidOperationException($"BlockCypher returned no data for '{path}'.");
+
+        // a 200 with a junk/empty/foreign body is a fetch failure, not a snapshot.
+        ChainInfoValidation.EnsureValid(network, dto, clock.GetUtcNow());
+
         return new ChainInfoResult(dto, raw);
     }
 }

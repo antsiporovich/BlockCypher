@@ -30,14 +30,14 @@ spec:
                 name: icmarkets-api-secrets
           readinessProbe:
             httpGet:
-              path: /health
+              path: /health/ready
               port: 8080
             initialDelaySeconds: 15
             periodSeconds: 10
             failureThreshold: 10
           livenessProbe:
             httpGet:
-              path: /health
+              path: /health/live
               port: 8080
             initialDelaySeconds: 30
             periodSeconds: 15

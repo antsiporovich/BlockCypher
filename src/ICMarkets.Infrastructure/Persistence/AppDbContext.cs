@@ -17,6 +17,14 @@ namespace ICMarkets.Infrastructure.Persistence;
 public class AppDbContext(DbContextOptions<AppDbContext> options, IPublisher publisher, IOptions<OutboxOptions>? outboxOptions = null)
     : DbContext(options), IUnitOfWork
 {
+    // Domain events whose outbox row is already staged in this context's change
+    // tracker. If a SaveChanges fails (the events are not cleared and the staged
+    // row stays tracked as Added) and is then retried, those events must not
+    // stage a SECOND row - otherwise the retry commits two outbox rows for one
+    // snapshot. Reference equality on purpose: events are records, so value
+    // equality would also collapse genuinely distinct-but-equal events.
+    private readonly HashSet<object> _stagedForOutbox = new(ReferenceEqualityComparer.Instance);
+
     public DbSet<BlockchainSnapshot> Snapshots => Set<BlockchainSnapshot>();
     public DbSet<OutboxMessage> Outbox => Set<OutboxMessage>();
 
@@ -68,10 +76,21 @@ public class AppDbContext(DbContextOptions<AppDbContext> options, IPublisher pub
         {
             b.Property(m => m.Type).IsRequired().HasMaxLength(200);
             b.Property(m => m.Payload).IsRequired();
-            // never ordered/compared in SQL (OutboxPublisherWorker orders by
-            // Id), so no SQLite DateTimeOffset conversion needed here, unlike
-            // BlockchainSnapshot.CreatedAt above.
             b.HasIndex(m => m.ProcessedAt);
+
+            // OutboxPublisherWorker compares ProcessedAt in SQL (the retention
+            // purge: ProcessedAt < cutoff), and SQLite cannot translate a
+            // DateTimeOffset comparison (stored as TEXT). Same fix as
+            // BlockchainSnapshot.CreatedAt above: on SQLite only, store UTC
+            // ticks; SQL Server keeps its native datetimeoffset. ProcessedAt is
+            // always UTC (DateTimeOffset.UtcNow), so nothing is lost. NULLs
+            // (unprocessed rows) are never passed through the converter.
+            if (Database.IsSqlite())
+            {
+                b.Property(m => m.ProcessedAt).HasConversion(
+                    d => d!.Value.UtcDateTime.Ticks,
+                    t => (DateTimeOffset?)new DateTimeOffset(t, TimeSpan.Zero));
+            }
         });
     }
 
@@ -96,7 +115,7 @@ public class AppDbContext(DbContextOptions<AppDbContext> options, IPublisher pub
         {
             foreach (var domainEvent in pendingEvents)
             {
-                if (domainEvent is SnapshotIngested ingested)
+                if (domainEvent is SnapshotIngested ingested && _stagedForOutbox.Add(domainEvent))
                 {
                     Outbox.Add(OutboxMessage.Create(
                         type: nameof(SnapshotIngested),
@@ -107,6 +126,9 @@ public class AppDbContext(DbContextOptions<AppDbContext> options, IPublisher pub
         }
 
         var result = await base.SaveChangesAsync(ct);
+
+        // committed: the staged rows are persisted, nothing left to de-duplicate.
+        _stagedForOutbox.Clear();
 
         foreach (var entry in ChangeTracker.Entries<BlockchainSnapshot>())
             entry.Entity.ClearDomainEvents();

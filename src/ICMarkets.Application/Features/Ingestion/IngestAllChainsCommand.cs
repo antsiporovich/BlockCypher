@@ -31,6 +31,7 @@ public sealed record IngestAllChainsResult(
 // Task-based (Channels + Parallel.ForEachAsync) and not PLINQ.
 public sealed class IngestAllChainsCommandHandler(
     IServiceScopeFactory scopeFactory,
+    TimeProvider clock,
     ILogger<IngestAllChainsCommandHandler> logger)
     : IRequestHandler<IngestAllChainsCommand, IngestAllChainsResult>
 {
@@ -96,7 +97,10 @@ public sealed class IngestAllChainsCommandHandler(
                     try
                     {
                         var result = await client.GetChainInfoAsync(network, token);
-                        await writer.WriteAsync(new FetchedChain(network, result), token);
+                        // stamped here, at fetch time - not at persist time, which
+                        // can be later if the item waits in the bounded channel.
+                        var fetchedAt = clock.GetUtcNow();
+                        await writer.WriteAsync(new FetchedChain(network, result, fetchedAt), token);
                     }
                     catch (Exception ex) when (ex is not OperationCanceledException)
                     {
@@ -122,19 +126,23 @@ public sealed class IngestAllChainsCommandHandler(
     private async Task<List<BlockchainSnapshotDto>> ConsumeAsync(
         ChannelReader<FetchedChain> reader, ConcurrentBag<IngestFailure> failures, CancellationToken ct)
     {
-        // Single consumer: every persist goes through one DI scope (one
-        // AppDbContext) sequentially, so there's no concurrent SaveChanges
-        // and no extra locking needed - DbContext just never sees two
-        // operations in flight at once.
+        // Single consumer: persists run one at a time, so there's no
+        // concurrent SaveChanges and no extra locking needed. But each item
+        // gets its OWN DI scope (and so its own AppDbContext): a failed
+        // SaveChanges leaves the rejected entity in the ChangeTracker as
+        // Added, and a shared context would retry inserting it together with
+        // the next valid entity - one bad response would then fail every
+        // later network too. A poisoned context is simply discarded with its
+        // scope. For 5 networks the per-item scope cost is negligible.
         var succeeded = new List<BlockchainSnapshotDto>();
-        using var scope = scopeFactory.CreateScope();
-        var sender = scope.ServiceProvider.GetRequiredService<ISender>();
 
         await foreach (var item in reader.ReadAllAsync(ct))
         {
             try
             {
-                var dto = await sender.Send(new PersistSnapshotCommand(item.Network, item.Result), ct);
+                using var scope = scopeFactory.CreateScope();
+                var sender = scope.ServiceProvider.GetRequiredService<ISender>();
+                var dto = await sender.Send(new PersistSnapshotCommand(item.Network, item.Result, item.FetchedAt), ct);
                 succeeded.Add(dto);
             }
             catch (Exception ex) when (ex is not OperationCanceledException)
@@ -148,5 +156,5 @@ public sealed class IngestAllChainsCommandHandler(
         return succeeded;
     }
 
-    private sealed record FetchedChain(Network Network, ChainInfoResult Result);
+    private sealed record FetchedChain(Network Network, ChainInfoResult Result, DateTimeOffset FetchedAt);
 }

@@ -6,6 +6,7 @@ using ICMarkets.Domain;
 using MediatR;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging.Abstractions;
+using Microsoft.Extensions.Time.Testing;
 using NSubstitute;
 
 namespace ICMarkets.UnitTests.Features.Ingestion;
@@ -42,7 +43,7 @@ public sealed class IngestAllChainsCommandHandlerTests
             });
 
         var scopeFactory = BuildScopeFactory(client, sender);
-        var handler = new IngestAllChainsCommandHandler(scopeFactory, NullLogger<IngestAllChainsCommandHandler>.Instance);
+        var handler = new IngestAllChainsCommandHandler(scopeFactory, TimeProvider.System, NullLogger<IngestAllChainsCommandHandler>.Instance);
 
         var result = await handler.Handle(new IngestAllChainsCommand(), CancellationToken.None);
 
@@ -76,7 +77,7 @@ public sealed class IngestAllChainsCommandHandlerTests
             });
 
         var scopeFactory = BuildScopeFactory(client, sender);
-        var handler = new IngestAllChainsCommandHandler(scopeFactory, NullLogger<IngestAllChainsCommandHandler>.Instance);
+        var handler = new IngestAllChainsCommandHandler(scopeFactory, TimeProvider.System, NullLogger<IngestAllChainsCommandHandler>.Instance);
 
         var result = await handler.Handle(new IngestAllChainsCommand(), CancellationToken.None);
 
@@ -106,12 +107,47 @@ public sealed class IngestAllChainsCommandHandlerTests
             });
 
         var scopeFactory = BuildScopeFactory(client, sender);
-        var handler = new IngestAllChainsCommandHandler(scopeFactory, NullLogger<IngestAllChainsCommandHandler>.Instance);
+        var handler = new IngestAllChainsCommandHandler(scopeFactory, TimeProvider.System, NullLogger<IngestAllChainsCommandHandler>.Instance);
 
         var result = await handler.Handle(new IngestAllChainsCommand(), CancellationToken.None);
 
         result.Succeeded.Should().HaveCount(Enum.GetValues<Network>().Length);
         result.Failed.Should().BeEmpty();
+    }
+
+    [Fact]
+    public async Task Handle_StampsFetchedAt_FromTheClock_OnTheCommandSentToPersist()
+    {
+        var client = Substitute.For<IBlockCypherClient>();
+        var sender = Substitute.For<ISender>();
+        var fetchTime = new DateTimeOffset(2026, 3, 4, 5, 6, 7, TimeSpan.Zero);
+        var clock = new FakeTimeProvider(fetchTime);
+
+        foreach (var network in Enum.GetValues<Network>())
+        {
+            client.GetChainInfoAsync(network, Arg.Any<CancellationToken>())
+                .Returns(new ChainInfoResult(new BlockCypherChainInfoDto { Name = network.ToString() }, "{}"));
+        }
+
+        var captured = new System.Collections.Concurrent.ConcurrentBag<PersistSnapshotCommand>();
+        sender.Send(Arg.Any<PersistSnapshotCommand>(), Arg.Any<CancellationToken>())
+            .Returns(callInfo =>
+            {
+                var cmd = (PersistSnapshotCommand)callInfo[0];
+                captured.Add(cmd);
+                return Task.FromResult(new BlockchainSnapshotDto(
+                    1, NetworkKey.ToKey(cmd.Network), cmd.Result.Dto.Name, 1, "hash",
+                    DateTimeOffset.UtcNow, null, null, null, 0, 0, null, null, null, null, cmd.FetchedAt));
+            });
+
+        var scopeFactory = BuildScopeFactory(client, sender);
+        var handler = new IngestAllChainsCommandHandler(scopeFactory, clock, NullLogger<IngestAllChainsCommandHandler>.Instance);
+
+        var result = await handler.Handle(new IngestAllChainsCommand(), CancellationToken.None);
+
+        captured.Should().HaveCount(Enum.GetValues<Network>().Length);
+        captured.Should().OnlyContain(c => c.FetchedAt == fetchTime);
+        result.Succeeded.Should().OnlyContain(s => s.CreatedAt == fetchTime);
     }
 
     private static IServiceScopeFactory BuildScopeFactory(IBlockCypherClient client, ISender sender)

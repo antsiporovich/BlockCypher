@@ -5,6 +5,7 @@ using ICMarkets.Application;
 using ICMarkets.Application.Telemetry;
 using ICMarkets.Infrastructure;
 using ICMarkets.Infrastructure.Persistence;
+using Microsoft.AspNetCore.Diagnostics.HealthChecks;
 using Microsoft.AspNetCore.HttpOverrides;
 using Microsoft.EntityFrameworkCore;
 using OpenTelemetry.Metrics;
@@ -116,7 +117,12 @@ app.UseSwaggerUI(o => o.SwaggerEndpoint("/openapi/v1.json", "v1"));
 // startup for nothing.
 app.UseCors("Default");
 app.MapControllers();
-app.MapHealthChecks("/health");
+app.MapHealthChecks("/health"); // everything, incl. DB (docker-compose healthcheck, humans)
+// k8s split: liveness must NOT touch the DB, or a DB outage makes the kubelet
+// restart a perfectly healthy API; readiness DOES, so traffic stops while the
+// DB is unreachable but the pod stays up.
+app.MapHealthChecks("/health/live", new HealthCheckOptions { Predicate = _ => false });
+app.MapHealthChecks("/health/ready");
 app.MapPrometheusScrapingEndpoint(); // GET /metrics
 
 // migrations on SQL Server, EnsureCreated on the SQLite no-Docker path

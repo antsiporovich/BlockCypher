@@ -14,10 +14,10 @@ public sealed class MigrationsIntegrationTests
 
     public MigrationsIntegrationTests(MsSqlContainerFixture fixture) => _fixture = fixture;
 
-    [Fact]
+    [SkippableFact]
     public async Task MigrateAsync_OnAFreshDatabase_AppliesAllMigrationsCleanly()
     {
-        if (!_fixture.IsAvailable) return;
+        Skip.IfNot(_fixture.IsAvailable, _fixture.UnavailableReason);
 
         var builder = new SqlConnectionStringBuilder(_fixture.ConnectionString)
         {
