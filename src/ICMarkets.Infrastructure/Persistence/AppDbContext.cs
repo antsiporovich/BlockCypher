@@ -10,7 +10,11 @@ using Microsoft.Extensions.Options;
 
 namespace ICMarkets.Infrastructure.Persistence;
 
-public class AppDbContext(DbContextOptions<AppDbContext> options, IPublisher publisher, IOptions<OutboxOptions> outboxOptions)
+// outboxOptions is optional so design-time (DesignTimeDbContextFactory) and the
+// integration tests can construct the context with `new AppDbContext(options,
+// publisher)` without wiring options; at runtime DI always injects the real
+// IOptions<OutboxOptions>. Null => outbox disabled (the write is gated below).
+public class AppDbContext(DbContextOptions<AppDbContext> options, IPublisher publisher, IOptions<OutboxOptions>? outboxOptions = null)
     : DbContext(options), IUnitOfWork
 {
     public DbSet<BlockchainSnapshot> Snapshots => Set<BlockchainSnapshot>();
@@ -88,7 +92,7 @@ public class AppDbContext(DbContextOptions<AppDbContext> options, IPublisher pub
         // local/SQLite dev and the functional tests), so writing rows nobody
         // will read would just grow the table forever. Flipping Outbox:Enabled
         // back on starts writing - and publishing - events from that point on.
-        if (outboxOptions.Value.Enabled)
+        if (outboxOptions?.Value.Enabled == true)
         {
             foreach (var domainEvent in pendingEvents)
             {
