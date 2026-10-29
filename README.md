@@ -246,5 +246,14 @@ this became, while every route currently lives on one.
   cheapest real broker to run in `docker-compose.yml` for this exercise.
 - **Kubernetes manifests aren't cluster-tested** — `docker-compose.yml` remains the verified path; see
   `k8s/README.md` for what's simplified.
+- **Swagger/Scalar/OpenAPI are exposed unconditionally, including in `Production`** — the k8s manifests
+  set `ASPNETCORE_ENVIRONMENT=Production` and the docs are still reachable there (the k8s README routes
+  reviewers through `/swagger` via port-forward). Intentional for this assessment, so a reviewer doesn't
+  need a second environment switch just to see the API docs; a real deployment would gate
+  `MapOpenApi`/`MapScalarApiReference`/`UseSwaggerUI` behind `app.Environment.IsDevelopment()` or a
+  feature flag.
+- **Outbox retention** — `OutboxPublisherWorker` purges processed rows older than
+  `Outbox:RetentionHours` (default 24h) on every tick, and the table is never written to at all while
+  `Outbox:Enabled` is false (the default local/SQLite path), so it stays bounded in both modes.
 
 See `docs/adr/` for the fuller reasoning behind the choices above.

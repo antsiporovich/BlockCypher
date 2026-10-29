@@ -41,7 +41,11 @@ services:
       Outbox__HostName: "rabbitmq"
 
   rabbitmq:
-    image: rabbitmq:3-management
+    # pinned, not :3-management - a floating major tag means `docker compose
+    # up --build` can silently pull a newer RabbitMQ later; same reasoning as
+    # the pinned SQL Server image above. Verify this still resolves on Docker
+    # Hub before relying on it long-term.
+    image: rabbitmq:4.2.7-management
     ports:
       - "5672:5672"   # AMQP
       - "15672:15672" # management UI (guest/guest)

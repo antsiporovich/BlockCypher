@@ -57,6 +57,17 @@ public sealed class OutboxPublisherWorker(
                     await db.SaveChangesAsync(stoppingToken);
                     logger.LogInformation("Published {Count} outbox message(s).", pending.Count);
                 }
+
+                // Retention: purge processed rows past the configured window so
+                // the table stays bounded under real traffic instead of growing
+                // forever - publishing alone never deletes a row.
+                var cutoff = DateTimeOffset.UtcNow.AddHours(-Math.Max(opts.RetentionHours, 1));
+                var purged = await db.Outbox
+                    .Where(m => m.ProcessedAt != null && m.ProcessedAt < cutoff)
+                    .ExecuteDeleteAsync(stoppingToken);
+
+                if (purged > 0)
+                    logger.LogInformation("Purged {Count} processed outbox message(s) older than {RetentionHours}h.", purged, opts.RetentionHours);
             }
             catch (Exception ex) when (ex is not OperationCanceledException)
             {

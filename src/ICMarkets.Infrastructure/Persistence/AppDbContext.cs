@@ -6,10 +6,11 @@ using ICMarkets.Domain.Events;
 using ICMarkets.Infrastructure.Messaging;
 using MediatR;
 using Microsoft.EntityFrameworkCore;
+using Microsoft.Extensions.Options;
 
 namespace ICMarkets.Infrastructure.Persistence;
 
-public class AppDbContext(DbContextOptions<AppDbContext> options, IPublisher publisher)
+public class AppDbContext(DbContextOptions<AppDbContext> options, IPublisher publisher, IOptions<OutboxOptions> outboxOptions)
     : DbContext(options), IUnitOfWork
 {
     public DbSet<BlockchainSnapshot> Snapshots => Set<BlockchainSnapshot>();
@@ -81,15 +82,23 @@ public class AppDbContext(DbContextOptions<AppDbContext> options, IPublisher pub
 
         // Transactional outbox: the row is added to the SAME SaveChanges call
         // as the snapshot that raised the event, so both commit together or
-        // neither does - see OutboxMessage for why that matters.
-        foreach (var domainEvent in pendingEvents)
+        // neither does - see OutboxMessage for why that matters. Gated on
+        // Outbox:Enabled - OutboxPublisherWorker is the only thing that ever
+        // drains this table, and it no-ops when disabled (default for
+        // local/SQLite dev and the functional tests), so writing rows nobody
+        // will read would just grow the table forever. Flipping Outbox:Enabled
+        // back on starts writing - and publishing - events from that point on.
+        if (outboxOptions.Value.Enabled)
         {
-            if (domainEvent is SnapshotIngested ingested)
+            foreach (var domainEvent in pendingEvents)
             {
-                Outbox.Add(OutboxMessage.Create(
-                    type: nameof(SnapshotIngested),
-                    payload: JsonSerializer.Serialize(ingested),
-                    occurredAt: ingested.CreatedAt));
+                if (domainEvent is SnapshotIngested ingested)
+                {
+                    Outbox.Add(OutboxMessage.Create(
+                        type: nameof(SnapshotIngested),
+                        payload: JsonSerializer.Serialize(ingested),
+                        occurredAt: ingested.CreatedAt));
+                }
             }
         }
 
