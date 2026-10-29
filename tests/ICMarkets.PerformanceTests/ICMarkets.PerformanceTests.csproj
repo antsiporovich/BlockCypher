@@ -7,16 +7,37 @@
     <ImplicitUsings>enable</ImplicitUsings>
     <IsPackable>false</IsPackable>
     <!-- shortcut: deliberately NOT added to ICMarkets.BlockCypher.slnx and never
-         referenced by `dotnet test` - this is a standalone NBomber load-testing
-         tool you run manually against a live instance of the API, not part of
-         the CI test suite. See README for how to run it. -->
+         referenced by `dotnet test` - this is a standalone BenchmarkDotNet
+         micro-benchmark tool you run manually (`dotnet run -c Release`), not
+         part of the CI test suite. See README for how to run it.
+
+         Switched from NBomber to BenchmarkDotNet (MIT): NBomber's free tier
+         is personal-use only - "You can't use it for an organization" per
+         its own licensing docs - so it fails the same commercial-license
+         bar that ruled out AutoMapper/MediatR 13+/FluentAssertions 8+
+         elsewhere in this project (see docs/DECISIONS.md and the
+         DEPENDENCY LICENSING POLICY in CLAUDE.md). BenchmarkDotNet is
+         unambiguously MIT with no paid tier. This also matches the plan's
+         own stated alternative ("NBomber ... or BenchmarkDotNet"), just
+         choosing the other branch. -->
   </PropertyGroup>
 
+  <!-- BenchmarkDotNet PackageReference is added by phase7-setup.ps1 via
+       `dotnet add` (Central Package Management) - deliberately NOT
+       pre-written here. dotnet add errors on CPM projects ("should not
+       define the version on the PackageReference items") when it finds an
+       existing bare PackageReference for the package it's adding and tries
+       to merge a Version into it; leaving no PackageReference at all lets
+       it create both the PackageReference and the Directory.Packages.props
+       entry cleanly, same as every other test package in this phase. -->
+
   <ItemGroup>
-    <PackageReference Include="NBomber" />
+    <ProjectReference Include="..\..\src\ICMarkets.Domain\ICMarkets.Domain.csproj" />
+    <ProjectReference Include="..\..\src\ICMarkets.Application\ICMarkets.Application.csproj" />
   </ItemGroup>
 
-  <!-- NBomber PackageReference is added by phase7-setup.ps1 via `dotnet add`,
-       never written here by hand (Central Package Management). -->
+  <ItemGroup>
+    <PackageReference Include="BenchmarkDotNet" />
+  </ItemGroup>
 
 </Project>
