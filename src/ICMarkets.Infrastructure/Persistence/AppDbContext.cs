@@ -99,23 +99,35 @@ public class AppDbContext(
         });
     }
 
-    // dispatches domain events raised on tracked entities after a successful
-    // save (only one event type exists today - SnapshotIngested - so this
-    // stays a direct check rather than a speculative generic dispatcher).
-    public override async Task<int> SaveChangesAsync(CancellationToken ct = default)
+    // DbContext funnels SaveChangesAsync() into SaveChangesAsync(bool, ct), and SaveChanges()
+    // into SaveChanges(bool). Overriding those two catches every entry point. Overriding only
+    // SaveChangesAsync(ct) left the (bool, ct) and sync paths writing the snapshot and dropping
+    // the outbox row with no error.
+    public override int SaveChanges(bool acceptAllChangesOnSuccess) =>
+        throw new NotSupportedException(
+            "Use SaveChangesAsync: AppDbContext's transactional outbox and domain-event dispatch are async-only.");
+
+    public override async Task<int> SaveChangesAsync(bool acceptAllChangesOnSuccess, CancellationToken ct = default)
+    {
+        var events = StageOutboxAndCollectEvents();
+        var result = await base.SaveChangesAsync(acceptAllChangesOnSuccess, ct);
+        ClearStagedAndEvents();
+        await DispatchNotificationsAsync(events, ct);
+        return result;
+    }
+
+    // Transactional outbox: the row is added to the SAME SaveChanges call as the snapshot
+    // that raised the event, so both commit together or neither does. Gated on
+    // Outbox:Enabled - the worker no-ops when disabled, so writing rows nobody will read
+    // would grow the table forever. Deduped via _stagedForOutbox so a retried save (the
+    // event is still on the entity, the staged row still tracked as Added) does not insert
+    // a second row. Only SnapshotIngested exists today.
+    private List<IDomainEvent> StageOutboxAndCollectEvents()
     {
         var pendingEvents = ChangeTracker.Entries<BlockchainSnapshot>()
             .SelectMany(e => e.Entity.DomainEvents)
             .ToList();
 
-        // Transactional outbox: the row is added to the SAME SaveChanges call
-        // as the snapshot that raised the event, so both commit together or
-        // neither does - see OutboxMessage for why that matters. Gated on
-        // Outbox:Enabled - OutboxPublisherWorker is the only thing that ever
-        // drains this table, and it no-ops when disabled (default for
-        // local/SQLite dev and the functional tests), so writing rows nobody
-        // will read would just grow the table forever. Flipping Outbox:Enabled
-        // back on starts writing - and publishing - events from that point on.
         if (outboxOptions?.Value.Enabled == true)
         {
             foreach (var domainEvent in pendingEvents)
@@ -130,20 +142,22 @@ public class AppDbContext(
             }
         }
 
-        var result = await base.SaveChangesAsync(ct);
+        return pendingEvents;
+    }
 
-        // committed: the staged rows are persisted, nothing left to de-duplicate.
+    private void ClearStagedAndEvents()
+    {
         _stagedForOutbox.Clear();
-
         foreach (var entry in ChangeTracker.Entries<BlockchainSnapshot>())
             entry.Entity.ClearDomainEvents();
+    }
 
-        // In-process notifications run AFTER the commit, so they are best-effort: the data is
-        // already durable, and a throwing subscriber must not turn a successful save into a
-        // failed one (the caller would report the network as failed, retry and duplicate it).
-        // The reliable side-effect path is the transactional outbox above; these local
-        // notifications are for observation only. Only a real cancellation propagates.
-        foreach (var domainEvent in pendingEvents)
+    // In-process notifications run AFTER the commit, so they are best-effort: the data is
+    // already durable, and a throwing subscriber must not turn a successful save into a
+    // failed one. The reliable side-effect path is the outbox. Only a real cancellation propagates.
+    private async Task DispatchNotificationsAsync(IReadOnlyList<IDomainEvent> events, CancellationToken ct)
+    {
+        foreach (var domainEvent in events)
         {
             if (domainEvent is not SnapshotIngested ingested)
                 continue;
@@ -158,7 +172,5 @@ public class AppDbContext(
                     "A post-commit SnapshotIngested subscriber failed; the snapshot was saved and the failure is ignored.");
             }
         }
-
-        return result;
     }
 }

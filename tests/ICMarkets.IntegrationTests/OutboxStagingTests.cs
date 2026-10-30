@@ -75,6 +75,55 @@ public sealed class OutboxStagingTests : IDisposable
         row.ProcessedAt.Should().BeNull();
     }
 
+    [Fact]
+    public async Task SaveChangesAsync_BoolOverload_StagesTheOutboxRow()
+    {
+        var options = new DbContextOptionsBuilder<AppDbContext>().UseSqlite(_connection).Options;
+
+        await using var db = new AppDbContext(options, new NoOpPublisher(), Options.Create(new OutboxOptions { Enabled = true }));
+        await db.Database.EnsureCreatedAsync();
+
+        db.Snapshots.Add(NewSnapshot());
+        await db.SaveChangesAsync(acceptAllChangesOnSuccess: true, CancellationToken.None);
+
+        (await db.Snapshots.CountAsync()).Should().Be(1);
+        (await db.Outbox.CountAsync()).Should().Be(1);
+    }
+
+    [Fact]
+    public async Task SaveChangesAsync_PlainOverload_StagesExactlyOneOutboxRow()
+    {
+        var options = new DbContextOptionsBuilder<AppDbContext>().UseSqlite(_connection).Options;
+
+        await using var db = new AppDbContext(options, new NoOpPublisher(), Options.Create(new OutboxOptions { Enabled = true }));
+        await db.Database.EnsureCreatedAsync();
+
+        db.Snapshots.Add(NewSnapshot());
+        await db.SaveChangesAsync();
+
+        (await db.Snapshots.CountAsync()).Should().Be(1);
+        (await db.Outbox.CountAsync()).Should().Be(1);
+    }
+
+    [Fact]
+    public async Task SyncSave_IsExplicitlyUnsupported()
+    {
+        var options = new DbContextOptionsBuilder<AppDbContext>().UseSqlite(_connection).Options;
+
+        await using var db = new AppDbContext(options, new NoOpPublisher(), Options.Create(new OutboxOptions { Enabled = true }));
+        await db.Database.EnsureCreatedAsync();
+
+        db.Snapshots.Add(NewSnapshot());
+
+        var save = () => db.SaveChanges();
+        var saveWithFlag = () => db.SaveChanges(acceptAllChangesOnSuccess: true);
+
+        save.Should().Throw<NotSupportedException>();
+        saveWithFlag.Should().Throw<NotSupportedException>();
+        (await db.Snapshots.CountAsync()).Should().Be(0);
+        (await db.Outbox.CountAsync()).Should().Be(0);
+    }
+
     private static BlockchainSnapshot NewSnapshot()
     {
         var t = new DateTimeOffset(2026, 1, 1, 0, 0, 0, TimeSpan.Zero);
