@@ -1,4 +1,5 @@
 using FluentValidation;
+using FluentValidation.Results;
 using MediatR;
 
 namespace ICMarkets.Application.Behaviors;
@@ -11,10 +12,18 @@ public sealed class ValidationBehavior<TRequest, TResponse>(IEnumerable<IValidat
         if (!validators.Any())
             return await next();
 
-        var context = new ValidationContext<TRequest>(request);
-        var failures = (await Task.WhenAll(validators.Select(v => v.ValidateAsync(context, ct))))
-            .SelectMany(r => r.Errors)
-            .ToList();
+        // Fresh ValidationContext per validator: FluentValidation accumulates failures into the
+        // context, so a single shared one both double-counts (every result surfaces the shared
+        // list) and is mutated concurrently under Task.WhenAll. Run sequentially - validation is
+        // cheap, and a validator may resolve the scoped DbContext (not thread-safe) for an async
+        // rule, which parallel execution would corrupt.
+        var failures = new List<ValidationFailure>();
+        foreach (var validator in validators)
+        {
+            var result = await validator.ValidateAsync(new ValidationContext<TRequest>(request), ct);
+            if (!result.IsValid)
+                failures.AddRange(result.Errors);
+        }
 
         if (failures.Count > 0)
             throw new ValidationException(failures);
