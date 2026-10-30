@@ -68,7 +68,7 @@ public sealed class RetryAfterApiFactory : ApiFactory
         base.ConfigureWebHost(builder);
 
         builder.ConfigureServices(services =>
-            services.AddHttpClient<IBlockCypherClient, BlockCypherClient>()
+            services.AddHttpClient<IChainInfoSource, BlockCypherClient>()
                 .ConfigurePrimaryHttpMessageHandler(() => _handler));
     }
 

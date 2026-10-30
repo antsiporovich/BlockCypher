@@ -1,6 +1,6 @@
 using ICMarkets.Domain;
 
-namespace ICMarkets.Application.Dtos;
+namespace ICMarkets.Infrastructure.BlockCypher;
 
 /// <summary>
 /// BlockCypher answered 200 but the body is not a usable chain summary for the
@@ -17,8 +17,9 @@ public sealed class InvalidChainInfoException(Network network, IReadOnlyList<str
 // "HTTP 200" only proves the transport worked, not that the body is a chain
 // summary: a `{}` or `{"error":"..."}` deserializes cleanly into a DTO full of
 // defaults (Name = "", Height = 0, Time = 0001-01-01) that would otherwise be
-// persisted as a successful snapshot. This runs before any domain snapshot is
-// built, so an invalid response is reported in `Failed`, not `Succeeded`.
+// persisted as a successful snapshot. This runs inside the adapter, before the
+// neutral ChainInfo is built, so an invalid response is reported in `Failed`,
+// not `Succeeded`. Validating the EXTERNAL contract is an adapter concern.
 //
 // Explicit guards rather than a FluentValidation validator: the check needs the
 // requested network and the clock as inputs, and the result is an exception on

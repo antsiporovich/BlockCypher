@@ -127,10 +127,11 @@ ingested response:
 - `RawJson` is only stored for a **valid** response: an HTTP 200 whose body is empty (`{}`), an error
   object, or another network's data (wrong name, wrong fee/gas family, missing `time`) is rejected in
   `BlockCypherClient` and reported in `failed`, never persisted as a snapshot of default values.
-- `CreatedAt` (`DateTimeOffset`, UTC) — the **fetch** time: stamped by the ingestion producer from an
-  injected `TimeProvider` right after the BlockCypher response arrives and carried through the channel
-  as `FetchedAt`. It is deliberately **not** read when the row is persisted — under backpressure a
-  fetched response can wait in the queue, and the history should show when the data was observed, not
+- `CreatedAt` (`DateTimeOffset`, UTC) — the **request** time: stamped by the ingestion producer from an
+  injected `TimeProvider` just *before* it calls BlockCypher and carried through the channel
+  as `RequestedAt`. It is deliberately **not** the response-receipt time (that varies with latency,
+  rate-limit queueing and retries) and **not** read when the row is persisted — under backpressure a
+  fetched response can wait in the queue, and the history should show when the data was asked for, not
   when it was written. Not `DateTime.UtcNow`, so it stays deterministic and testable. History is always
   returned ordered `CreatedAt DESC`, with `Id DESC` as a tiebreaker for same-timestamp rows, backed by
   a composite `(Network, CreatedAt DESC)` index.
@@ -179,6 +180,7 @@ variables (`Database__Provider`, etc. — the compose file shows this).
 | `BlockCypher:RequestsPerSecond` | int, default 3 | Process-wide cap on real HTTP attempts to BlockCypher (retries included), shared by every caller. Excess requests wait in a queue. |
 | `BlockCypher:Token` | string, optional | Free BlockCypher token to raise the anonymous rate limit. Empty = anonymous access. |
 | `Ingestion:Enabled` / `Ingestion:IntervalSeconds` | bool / int | Background ingestion worker on/off and poll interval (default 300s — deliberately modest to respect BlockCypher's rate limits). |
+| `ForwardedHeaders:Enabled` / `KnownNetworks` / `KnownProxies` | bool / string[] / string[] | Honor `X-Forwarded-*` from a gateway. Off by default; when on, honored **only** from the listed CIDR networks / proxy IPs (empty lists = loopback only). `docker-compose.yml` lists the compose network. Never trust all senders: a direct caller could spoof client address, scheme and host. |
 | `Cors:AllowedOrigins` | string array | Empty = allow any origin (no browser client for this assessment); set to lock down the CORS policy for a real deployment. |
 | `OpenTelemetry:OtlpEndpoint` | URL, optional | Where to export OTel traces via OTLP. Empty = traces still run through the pipeline, just nothing is exported over the network. |
 
@@ -209,8 +211,9 @@ variables (`Database__Provider`, etc. — the compose file shows this).
   calls and the background worker share it, and callers over the budget queue instead of failing.
   Limits worth stating plainly: it is per process (several replicas would need a distributed limiter,
   e.g. Redis), and a per-second limit does not enforce BlockCypher's separate hourly quota - that is
-  what the optional token and the 300s worker interval are for. Each parallel branch gets its own DI scope
-  (`IServiceScopeFactory`) because `DbContext` isn't thread-safe, and one network failing never aborts
+  what the optional token and the 300s worker interval are for. Each persisted item gets its own unit of work
+  (a fresh `DbContext`, via the `IUnitOfWorkFactory` port - Application never touches the DI container)
+  because a failed `SaveChanges` poisons the context, and one network failing never aborts
   the others.
 - **Dependency licensing.** Several .NET staples went commercial in 2025–2026; ICMarkets is well above
   any plausible free-tier revenue threshold, so the licence terms matter in practice, not just in
@@ -227,7 +230,7 @@ variables (`Database__Provider`, etc. — the compose file shows this).
   Enforced mechanically: every version lives in `Directory.Packages.props` (Central Package Management),
   so a stray `dotnet add` can't silently drift onto a commercial version.
 - **The API serves stored history, not a live BlockCypher proxy.** This is the task's own requirement —
-  `CreatedAt` is set once, at fetch time, and every read endpoint queries the database, never BlockCypher
+  `CreatedAt` is set once, at request time, and every read endpoint queries the database, never BlockCypher
   directly. This is also what makes the functional tests fast, deterministic and independent of
   BlockCypher's availability or rate limits (WireMock stands in for BlockCypher there).
 - **Messaging: at-least-once, not exactly-once.** `SnapshotIngested` is written to an outbox table in the
@@ -242,6 +245,11 @@ variables (`Database__Provider`, etc. — the compose file shows this).
     (`Outbox:Queue`, empty = declare nothing and let real consumers bind their own).
   - Messages are `Persistent` (with a durable queue they survive a broker restart) and carry
     `MessageId` = the outbox row id, stable across retries.
+  - Each publish has its own time budget (`Outbox:PublishTimeoutSeconds`, default 10): RabbitMQ.Client
+    waits for a confirm with no timeout, so without it a broker that stays connected but stops
+    confirming would stall the queue indefinitely. When the budget runs out the attempt is abandoned,
+    the channel is recreated (its confirm state is undefined after a cancelled publish) and the next
+    tick retries; a late confirm for the abandoned attempt is one more reason consumers de-duplicate.
   - Broker down, nack or unroutable → the row stays unprocessed and is retried on the next tick. Each row
     is saved as soon as it is confirmed, so a failure later in a batch does not re-publish confirmed rows.
   - The remaining duplicate window — a crash between the broker's ack and saving `ProcessedAt` — is
@@ -257,7 +265,7 @@ Kubernetes — to where it lives in this codebase, rather than leaving it implic
 
 | Requirement | Where it lives here |
 |---|---|
-| Multithreading, concurrency, thread safety, fault tolerance | Bounded `System.Threading.Channels` + `Parallel.ForEachAsync` ingestion pipeline, per-branch DI scopes, per-network failure isolation — see "Design decisions & trade-offs" above and ADR 0004. |
+| Multithreading, concurrency, thread safety, fault tolerance | Bounded `System.Threading.Channels` + `Parallel.ForEachAsync` ingestion pipeline, a fresh unit of work per persisted item (`IUnitOfWorkFactory` port), per-network failure isolation — see "Design decisions & trade-offs" above and ADR 0004. |
 | Clean Architecture + Vertical Slice + CQRS | Four-layer Clean Architecture with feature folders (`Application/Features/{Ingestion,History,Networks}`) inside it; CQRS via MediatR. See "Architecture" and "Design patterns used" above. |
 | Domain-driven | `BlockchainSnapshot` as a rich entity with a static factory, `FeeRates`/`GasPrices` value objects, a `SnapshotIngested` domain event — deliberately scoped short of full tactical DDD, which five snapshot tables don't justify. |
 | Event-driven design (Kafka/AWS SQS/RabbitMQ) | Transactional outbox + **RabbitMQ** publisher on `SnapshotIngested` (`Infrastructure/Messaging/`), off by default, on in `docker-compose.yml`. A fanout exchange means a Kafka or SQS consumer could subscribe without this publisher changing; swapping the exchange for a Kafka topic is a new `IEventPublisher` implementation, not a redesign. |

@@ -39,7 +39,7 @@ public sealed class SlowBodyIsolationTests : IClassFixture<SlowBodyApiFactory>
         response.StatusCode.Should().Be(HttpStatusCode.OK);
 
         var result = await response.Content.ReadFromJsonAsync<IngestAllChainsResult>(JsonOptions);
-        result!.Succeeded.Should().HaveCount(4);
+        result!.Succeeded.Should().HaveCount(4, "failures were: {0}", string.Join(" | ", result.Failed.Select(f => $"{f.Network}: {f.Error}")));
         result.Failed.Should().ContainSingle(f => f.Network == Network.LtcMain);
     }
 }
@@ -57,7 +57,7 @@ public sealed class SlowBodyApiFactory : ApiFactory
         }));
 
         builder.ConfigureServices(services =>
-            services.AddHttpClient<IBlockCypherClient, BlockCypherClient>()
+            services.AddHttpClient<IChainInfoSource, BlockCypherClient>()
                 .ConfigurePrimaryHttpMessageHandler(() => new StalledLtcBodyHandler()));
     }
 

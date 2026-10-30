@@ -30,10 +30,13 @@ public static class DependencyInjection
         // AppDbContext already implements IUnitOfWork - expose it as that
         // interface too, resolving to the same scoped instance (same DbContext).
         services.AddScoped<IUnitOfWork>(sp => sp.GetRequiredService<AppDbContext>());
+        // Application asks for a fresh unit of work per ingested item; the scope/DbContext
+        // lifetime behind it is built here.
+        services.AddSingleton<IUnitOfWorkFactory, IngestionUnitOfWorkFactory>();
 
         services.Configure<BlockCypherOptions>(config.GetSection(BlockCypherOptions.SectionName));
         services.AddSingleton<BlockCypherRateLimiter>();
-        var blockCypherClient = services.AddHttpClient<IBlockCypherClient, BlockCypherClient>((sp, c) =>
+        var blockCypherClient = services.AddHttpClient<IChainInfoSource, BlockCypherClient>((sp, c) =>
             {
                 var opts = sp.GetRequiredService<IOptions<BlockCypherOptions>>().Value;
                 c.BaseAddress = new Uri(opts.BaseUrl);
@@ -63,7 +66,7 @@ public static class DependencyInjection
                 resilience.Retry.UseJitter = true;
             });
         blockCypherClient.AddHttpMessageHandler(sp =>
-            new RateLimitingHandler(sp.GetRequiredService<BlockCypherRateLimiter>().Limiter));
+            new RateLimitingHandler(sp.GetRequiredService<BlockCypherRateLimiter>()));
 
         services.Configure<IngestionOptions>(config.GetSection(IngestionOptions.SectionName));
         services.AddHostedService<ChainIngestionWorker>();

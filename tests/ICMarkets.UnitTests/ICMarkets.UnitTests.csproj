@@ -22,6 +22,7 @@
   <ItemGroup>
     <ProjectReference Include="..\..\src\ICMarkets.Domain\ICMarkets.Domain.csproj" />
     <ProjectReference Include="..\..\src\ICMarkets.Application\ICMarkets.Application.csproj" />
+    <ProjectReference Include="..\..\src\ICMarkets.Infrastructure\ICMarkets.Infrastructure.csproj" />
   </ItemGroup>
 
 </Project>

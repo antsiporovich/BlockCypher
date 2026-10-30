@@ -1,160 +1,171 @@
+using System.Collections.Concurrent;
 using AwesomeAssertions;
 using ICMarkets.Application.Abstractions;
 using ICMarkets.Application.Dtos;
 using ICMarkets.Application.Features.Ingestion;
+using ICMarkets.Application.Mapping;
 using ICMarkets.Domain;
-using MediatR;
-using Microsoft.Extensions.DependencyInjection;
+using ICMarkets.Domain.Entities;
+using ICMarkets.Domain.ValueObjects;
 using Microsoft.Extensions.Logging.Abstractions;
 using Microsoft.Extensions.Time.Testing;
 using NSubstitute;
 
 namespace ICMarkets.UnitTests.Features.Ingestion;
 
-// IngestAllChainsCommandHandler resolves IBlockCypherClient (producer side)
-// and ISender (consumer side) from a fresh DI scope per Parallel.ForEachAsync
-// branch and per consumer loop (see the handler's own comments), rather than
-// taking them as constructor dependencies - so the cleanest substitution
-// point is a tiny real ServiceCollection with NSubstitute doubles behind it,
-// not a hand-mocked IServiceScopeFactory/IServiceScope chain.
+// The handler takes its collaborators directly: the chain-info port and the unit-of-work
+// factory port. The factory is a hand-written fake (not a mock chain) so the tests can see
+// what was staged, what was committed, and how many units of work were created/disposed.
 public sealed class IngestAllChainsCommandHandlerTests
 {
+    private static IngestAllChainsCommandHandler Handler(
+        IChainInfoSource source, FakeUnitOfWorkFactory factory, TimeProvider? clock = null) =>
+        new(source, factory, new SnapshotMapper(), clock ?? TimeProvider.System,
+            NullLogger<IngestAllChainsCommandHandler>.Instance);
+
+    private static IChainInfoSource HealthySource(Func<Network, string>? rawJson = null)
+    {
+        var source = Substitute.For<IChainInfoSource>();
+        foreach (var network in Enum.GetValues<Network>())
+        {
+            source.GetChainInfoAsync(network, Arg.Any<CancellationToken>())
+                .Returns(new ChainInfoResult(TestChainInfo(network), rawJson?.Invoke(network) ?? "{}"));
+        }
+        return source;
+    }
+
     [Fact]
     public async Task Handle_OneNetworkFetchFails_StillPersistsTheOtherFour()
     {
-        var client = Substitute.For<IBlockCypherClient>();
-        var sender = Substitute.For<ISender>();
-
-        client.GetChainInfoAsync(Network.EthMain, Arg.Any<CancellationToken>())
+        var source = HealthySource();
+        source.GetChainInfoAsync(Network.EthMain, Arg.Any<CancellationToken>())
             .Returns(Task.FromException<ChainInfoResult>(new HttpRequestException("upstream unavailable")));
-        foreach (var network in Enum.GetValues<Network>().Where(n => n != Network.EthMain))
-        {
-            client.GetChainInfoAsync(network, Arg.Any<CancellationToken>())
-                .Returns(new ChainInfoResult(new BlockCypherChainInfoDto { Name = network.ToString() }, "{}"));
-        }
+        var factory = new FakeUnitOfWorkFactory();
 
-        sender.Send(Arg.Any<PersistSnapshotCommand>(), Arg.Any<CancellationToken>())
-            .Returns(callInfo =>
-            {
-                var cmd = (PersistSnapshotCommand)callInfo[0];
-                return Task.FromResult(new BlockchainSnapshotDto(
-                    1, NetworkKey.ToKey(cmd.Network), cmd.Result.Dto.Name, 1, "hash",
-                    DateTimeOffset.UtcNow, null, null, null, 0, 0, null, null, null, null, DateTimeOffset.UtcNow));
-            });
-
-        var scopeFactory = BuildScopeFactory(client, sender);
-        var handler = new IngestAllChainsCommandHandler(scopeFactory, TimeProvider.System, NullLogger<IngestAllChainsCommandHandler>.Instance);
-
-        var result = await handler.Handle(new IngestAllChainsCommand(), CancellationToken.None);
+        var result = await Handler(source, factory).Handle(new IngestAllChainsCommand(), CancellationToken.None);
 
         result.Succeeded.Should().HaveCount(4);
         result.Failed.Should().ContainSingle(f => f.Network == Network.EthMain);
         result.Succeeded.Select(s => s.Network).Should().NotContain("eth-main");
+        factory.Saved.Should().HaveCount(4);
     }
 
     [Fact]
-    public async Task Handle_OnePersistFails_StillReportsTheOtherFourAsSucceeded()
+    public async Task Handle_OnePersistFails_StillReportsTheOtherFourAsSucceeded_EachInItsOwnUnitOfWork()
     {
-        var client = Substitute.For<IBlockCypherClient>();
-        var sender = Substitute.For<ISender>();
+        var factory = new FakeUnitOfWorkFactory(failOn: Network.LtcMain);
 
-        foreach (var network in Enum.GetValues<Network>())
-        {
-            client.GetChainInfoAsync(network, Arg.Any<CancellationToken>())
-                .Returns(new ChainInfoResult(new BlockCypherChainInfoDto { Name = network.ToString() }, "{}"));
-        }
-
-        sender.Send(Arg.Any<PersistSnapshotCommand>(), Arg.Any<CancellationToken>())
-            .Returns(callInfo =>
-            {
-                var cmd = (PersistSnapshotCommand)callInfo[0];
-                if (cmd.Network == Network.LtcMain)
-                    return Task.FromException<BlockchainSnapshotDto>(new InvalidOperationException("db write failed"));
-
-                return Task.FromResult(new BlockchainSnapshotDto(
-                    1, NetworkKey.ToKey(cmd.Network), cmd.Result.Dto.Name, 1, "hash",
-                    DateTimeOffset.UtcNow, null, null, null, 0, 0, null, null, null, null, DateTimeOffset.UtcNow));
-            });
-
-        var scopeFactory = BuildScopeFactory(client, sender);
-        var handler = new IngestAllChainsCommandHandler(scopeFactory, TimeProvider.System, NullLogger<IngestAllChainsCommandHandler>.Instance);
-
-        var result = await handler.Handle(new IngestAllChainsCommand(), CancellationToken.None);
+        var result = await Handler(HealthySource(), factory).Handle(new IngestAllChainsCommand(), CancellationToken.None);
 
         result.Succeeded.Should().HaveCount(4);
         result.Failed.Should().ContainSingle(f => f.Network == Network.LtcMain);
+        factory.Saved.Should().HaveCount(4);
+        // one fresh unit of work per item, and every one - including the failed - disposed.
+        factory.Created.Should().Be(5);
+        factory.Disposed.Should().Be(5);
     }
 
     [Fact]
     public async Task Handle_AllNetworksSucceed_ReturnsAllFiveWithNoFailures()
     {
-        var client = Substitute.For<IBlockCypherClient>();
-        var sender = Substitute.For<ISender>();
+        var factory = new FakeUnitOfWorkFactory();
 
-        foreach (var network in Enum.GetValues<Network>())
-        {
-            client.GetChainInfoAsync(network, Arg.Any<CancellationToken>())
-                .Returns(new ChainInfoResult(new BlockCypherChainInfoDto { Name = network.ToString() }, "{}"));
-        }
-
-        sender.Send(Arg.Any<PersistSnapshotCommand>(), Arg.Any<CancellationToken>())
-            .Returns(callInfo =>
-            {
-                var cmd = (PersistSnapshotCommand)callInfo[0];
-                return Task.FromResult(new BlockchainSnapshotDto(
-                    1, NetworkKey.ToKey(cmd.Network), cmd.Result.Dto.Name, 1, "hash",
-                    DateTimeOffset.UtcNow, null, null, null, 0, 0, null, null, null, null, DateTimeOffset.UtcNow));
-            });
-
-        var scopeFactory = BuildScopeFactory(client, sender);
-        var handler = new IngestAllChainsCommandHandler(scopeFactory, TimeProvider.System, NullLogger<IngestAllChainsCommandHandler>.Instance);
-
-        var result = await handler.Handle(new IngestAllChainsCommand(), CancellationToken.None);
+        var result = await Handler(HealthySource(), factory).Handle(new IngestAllChainsCommand(), CancellationToken.None);
 
         result.Succeeded.Should().HaveCount(Enum.GetValues<Network>().Length);
         result.Failed.Should().BeEmpty();
     }
 
     [Fact]
-    public async Task Handle_StampsFetchedAt_FromTheClock_OnTheCommandSentToPersist()
+    public async Task Handle_CreatedAt_IsTheFetchTimeFromTheClock()
     {
-        var client = Substitute.For<IBlockCypherClient>();
-        var sender = Substitute.For<ISender>();
         var fetchTime = new DateTimeOffset(2026, 3, 4, 5, 6, 7, TimeSpan.Zero);
-        var clock = new FakeTimeProvider(fetchTime);
+        var factory = new FakeUnitOfWorkFactory();
 
-        foreach (var network in Enum.GetValues<Network>())
-        {
-            client.GetChainInfoAsync(network, Arg.Any<CancellationToken>())
-                .Returns(new ChainInfoResult(new BlockCypherChainInfoDto { Name = network.ToString() }, "{}"));
-        }
+        var result = await Handler(HealthySource(), factory, new FakeTimeProvider(fetchTime))
+            .Handle(new IngestAllChainsCommand(), CancellationToken.None);
 
-        var captured = new System.Collections.Concurrent.ConcurrentBag<PersistSnapshotCommand>();
-        sender.Send(Arg.Any<PersistSnapshotCommand>(), Arg.Any<CancellationToken>())
-            .Returns(callInfo =>
-            {
-                var cmd = (PersistSnapshotCommand)callInfo[0];
-                captured.Add(cmd);
-                return Task.FromResult(new BlockchainSnapshotDto(
-                    1, NetworkKey.ToKey(cmd.Network), cmd.Result.Dto.Name, 1, "hash",
-                    DateTimeOffset.UtcNow, null, null, null, 0, 0, null, null, null, null, cmd.FetchedAt));
-            });
-
-        var scopeFactory = BuildScopeFactory(client, sender);
-        var handler = new IngestAllChainsCommandHandler(scopeFactory, clock, NullLogger<IngestAllChainsCommandHandler>.Instance);
-
-        var result = await handler.Handle(new IngestAllChainsCommand(), CancellationToken.None);
-
-        captured.Should().HaveCount(Enum.GetValues<Network>().Length);
-        captured.Should().OnlyContain(c => c.FetchedAt == fetchTime);
+        factory.Saved.Should().OnlyContain(s => s.CreatedAt == fetchTime);
         result.Succeeded.Should().OnlyContain(s => s.CreatedAt == fetchTime);
     }
 
-    private static IServiceScopeFactory BuildScopeFactory(IBlockCypherClient client, ISender sender)
+    [Fact]
+    public async Task Handle_PersistsFeeRatesForBitcoinLikeAndGasPricesForEthereum_AndKeepsTheRawPayload()
     {
-        var services = new ServiceCollection();
-        services.AddScoped(_ => client);
-        services.AddScoped(_ => sender);
-        return services.BuildServiceProvider(validateScopes: true).GetRequiredService<IServiceScopeFactory>();
+        var factory = new FakeUnitOfWorkFactory();
+
+        await Handler(HealthySource(n => $"{{\"raw\":\"{n}\"}}"), factory)
+            .Handle(new IngestAllChainsCommand(), CancellationToken.None);
+
+        var btc = factory.Saved.Single(s => s.Network == Network.BtcMain);
+        btc.FeeRates.Should().Be(new FeeRates(10, 5, 1));
+        btc.GasPrices.Should().BeNull();
+        btc.RawJson.Should().Be("{\"raw\":\"BtcMain\"}");
+
+        var eth = factory.Saved.Single(s => s.Network == Network.EthMain);
+        eth.GasPrices.Should().Be(new GasPrices(30, 20, 10, null, null, null, null));
+        eth.FeeRates.Should().BeNull();
+    }
+
+    private static ChainInfo TestChainInfo(Network network) =>
+        new(network.ToString(), 1, "hash", DateTimeOffset.UtcNow, null, null, null, 0, 0,
+            FeeRates: network == Network.EthMain ? null : new FeeRates(10, 5, 1),
+            GasPrices: network == Network.EthMain ? new GasPrices(30, 20, 10, null, null, null, null) : null,
+            LastForkHeight: null, LastForkHash: null);
+
+    private sealed class FakeUnitOfWorkFactory(Network? failOn = null) : IUnitOfWorkFactory
+    {
+        private int _created;
+        private int _disposed;
+
+        public ConcurrentBag<BlockchainSnapshot> Saved { get; } = [];
+        public int Created => _created;
+        public int Disposed => _disposed;
+
+        public IIngestionUnitOfWork Create()
+        {
+            Interlocked.Increment(ref _created);
+            return new Uow(this, failOn);
+        }
+
+        private sealed class Uow(FakeUnitOfWorkFactory owner, Network? failOn) : IIngestionUnitOfWork
+        {
+            private readonly Repo _repo = new();
+
+            public IBlockchainRepository Snapshots => _repo;
+
+            public Task<int> SaveChangesAsync(CancellationToken ct)
+            {
+                if (failOn is { } network && _repo.Pending.Any(s => s.Network == network))
+                    return Task.FromException<int>(new InvalidOperationException("db write failed"));
+
+                foreach (var snapshot in _repo.Pending)
+                    owner.Saved.Add(snapshot);
+                return Task.FromResult(_repo.Pending.Count);
+            }
+
+            public ValueTask DisposeAsync()
+            {
+                Interlocked.Increment(ref owner._disposed);
+                return ValueTask.CompletedTask;
+            }
+        }
+
+        private sealed class Repo : IBlockchainRepository
+        {
+            public List<BlockchainSnapshot> Pending { get; } = [];
+
+            public Task AddAsync(BlockchainSnapshot entity, CancellationToken ct)
+            {
+                Pending.Add(entity);
+                return Task.CompletedTask;
+            }
+
+            public Task<List<BlockchainSnapshot>> GetHistoryAsync(Network network, int take, int skip, CancellationToken ct) =>
+                throw new NotSupportedException();
+
+            public Task<BlockchainSnapshot?> GetLatestAsync(Network network, CancellationToken ct) =>
+                throw new NotSupportedException();
+        }
     }
 }

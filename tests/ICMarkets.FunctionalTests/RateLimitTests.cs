@@ -39,7 +39,7 @@ public sealed class RateLimitTests
         var work = Enumerable.Range(0, callers).Select(async _ =>
         {
             using var scope = _factory.Services.CreateScope();
-            var client = scope.ServiceProvider.GetRequiredService<IBlockCypherClient>();
+            var client = scope.ServiceProvider.GetRequiredService<IChainInfoSource>();
             await Task.WhenAll(Enum.GetValues<Network>().Select(n => client.GetChainInfoAsync(n, CancellationToken.None)));
         });
         await Task.WhenAll(work);
@@ -47,14 +47,16 @@ public sealed class RateLimitTests
         var stamps = _factory.Attempts;
         stamps.Should().HaveCount(callers * Enum.GetValues<Network>().Length);
 
-        // busiest one-second window. The limiter spaces permits ~333 ms apart (3 per
-        // second); the tolerance covers timestamp jitter - dispatch can be delayed and
-        // bunched by the scheduler, e.g. while another test process (Docker containers)
-        // is loading the machine. Without a limiter all 20 arrive within ~100 ms.
-        var busiest = stamps.Max(start => stamps.Count(t => t >= start && t < start + TimeSpan.FromSeconds(1)));
+        // Strict contract: at most 3 in ANY one-second window, no slack up to 4-5. The
+        // timestamps are taken in the last handler, a few microseconds after a grant, so a
+        // window of 950 ms (1 s minus a 50 ms allowance for scheduling jitter between the
+        // grant and this timestamp) must still hold at most 3. A token bucket - which only
+        // bounds the average - violates this: it can grant two permits milliseconds apart.
+        var window = TimeSpan.FromMilliseconds(950);
+        var busiest = stamps.Max(start => stamps.Count(t => t >= start && t < start + window));
         var offsets = string.Join(", ", stamps.Select(t => (int)(t - stamps[0]).TotalMilliseconds));
-        busiest.Should().BeLessThanOrEqualTo(5,
-            $"at most ~3 requests per second may reach the upstream; arrival offsets in ms: [{offsets}]");
+        busiest.Should().BeLessThanOrEqualTo(3,
+            $"at most 3 requests may reach the upstream in any one-second window; arrival offsets in ms: [{offsets}]");
 
         // and it really did throttle: 20 requests at 3/s cannot finish in a blink.
         (stamps[^1] - stamps[0]).Should().BeGreaterThan(TimeSpan.FromSeconds(4));
@@ -77,7 +79,7 @@ public sealed class RateLimitApiFactory : ApiFactory
         }));
 
         builder.ConfigureServices(services =>
-            services.AddHttpClient<IBlockCypherClient, BlockCypherClient>()
+            services.AddHttpClient<IChainInfoSource, BlockCypherClient>()
                 .ConfigurePrimaryHttpMessageHandler(() => _handler));
     }
 

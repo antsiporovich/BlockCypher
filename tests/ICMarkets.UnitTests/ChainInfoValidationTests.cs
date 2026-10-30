@@ -1,6 +1,6 @@
 using AwesomeAssertions;
-using ICMarkets.Application.Dtos;
 using ICMarkets.Domain;
+using ICMarkets.Infrastructure.BlockCypher;
 
 namespace ICMarkets.UnitTests;
 

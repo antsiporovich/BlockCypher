@@ -8,7 +8,7 @@ namespace ICMarkets.Infrastructure.Persistence;
 public class BlockchainRepository(AppDbContext db) : IBlockchainRepository
 {
     // No SaveChanges here - the caller commits via IUnitOfWork (see
-    // PersistSnapshotCommandHandler), so a handler can stage several repository
+    // IngestAllChainsCommandHandler), so a handler can stage several repository
     // calls and commit them together.
     public Task AddAsync(BlockchainSnapshot snapshot, CancellationToken ct)
     {

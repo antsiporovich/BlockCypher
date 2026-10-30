@@ -6,7 +6,7 @@ using Microsoft.Extensions.Options;
 
 namespace ICMarkets.Infrastructure.BlockCypher;
 
-public class BlockCypherClient(HttpClient http, IOptions<BlockCypherOptions> options, TimeProvider clock) : IBlockCypherClient
+public class BlockCypherClient(HttpClient http, IOptions<BlockCypherOptions> options, TimeProvider clock) : IChainInfoSource
 {
     public async Task<ChainInfoResult> GetChainInfoAsync(Network network, CancellationToken ct)
     {
@@ -43,6 +43,7 @@ public class BlockCypherClient(HttpClient http, IOptions<BlockCypherOptions> opt
         // a 200 with a junk/empty/foreign body is a fetch failure, not a snapshot.
         ChainInfoValidation.EnsureValid(network, dto, clock.GetUtcNow());
 
-        return new ChainInfoResult(dto, raw);
+        // adapter output: the neutral summary (Application never sees the wire DTO) + the raw payload.
+        return new ChainInfoResult(BlockCypherChainInfoMapper.ToChainInfo(dto), raw);
     }
 }

@@ -54,6 +54,15 @@ public sealed class RabbitMqEventPublisher(IOptions<OutboxOptions> options)
                 body: Encoding.UTF8.GetBytes(payload),
                 cancellationToken: ct);
         }
+        // After a cancelled or timed-out publish the channel's confirm tracking is in an
+        // undefined state (the broker may still ack or nack the abandoned message later), so
+        // reusing it could mis-attribute a confirm. Drop it; the next publish builds a fresh
+        // connection and channel. A nack/unroutable return is a clean answer and keeps the channel.
+        catch (Exception ex) when (ex is OperationCanceledException or TimeoutException)
+        {
+            await CloseQuietlyAsync();
+            throw;
+        }
         finally
         {
             _lock.Release();

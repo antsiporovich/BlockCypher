@@ -92,16 +92,12 @@ var app = builder.Build();
 // (localhost:8081) instead of the internal Docker DNS name YARP otherwise
 // proxies with (api:8080) - without this, the native OpenAPI document's
 // auto-detected server URL bakes in "api:8080", which Swagger UI's "Execute"
-// can't reach from a host browser. KnownIPNetworks/KnownProxies are cleared
-// because the gateway's container IP isn't known ahead of time in compose;
-// fine for this stack, a real deployment would restrict it.
-var forwardedHeaders = new ForwardedHeadersOptions
-{
-    ForwardedHeaders = ForwardedHeaders.XForwardedFor | ForwardedHeaders.XForwardedProto | ForwardedHeaders.XForwardedHost,
-};
-forwardedHeaders.KnownIPNetworks.Clear();
-forwardedHeaders.KnownProxies.Clear();
-app.UseForwardedHeaders(forwardedHeaders);
+// can't reach from a host browser. Opt-in via the ForwardedHeaders config section
+// and honored ONLY from the configured networks/proxies (docker-compose lists the
+// compose network); an unconfigured API trusts no X-Forwarded-* at all.
+var forwardedHeaders = ForwardedHeadersSetup.Build(app.Configuration);
+if (forwardedHeaders is not null)
+    app.UseForwardedHeaders(forwardedHeaders);
 
 app.UseSerilogRequestLogging();
 

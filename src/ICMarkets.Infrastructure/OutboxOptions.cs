@@ -26,6 +26,12 @@ public sealed class OutboxOptions
     public int PollIntervalSeconds { get; init; } = 5;
     public int BatchSize { get; init; } = 50;
 
+    // Budget for ONE publish (connect + declare + publish + broker confirm). RabbitMQ.Client
+    // awaits the confirm with no timeout of its own, so a broker that keeps the connection
+    // open but stops confirming would otherwise stall the whole queue forever. When the
+    // budget runs out the row stays unprocessed and the next tick tries again.
+    public int PublishTimeoutSeconds { get; init; } = 10;
+
     // how long a processed row stays around before OutboxPublisherWorker
     // purges it - keeps the table bounded under real traffic instead of
     // growing forever once Enabled = true.

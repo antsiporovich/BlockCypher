@@ -4,9 +4,10 @@ using System.Threading.Channels;
 using ICMarkets.Application.Abstractions;
 using ICMarkets.Application.Dtos;
 using ICMarkets.Application.Telemetry;
+using ICMarkets.Application.Mapping;
 using ICMarkets.Domain;
+using ICMarkets.Domain.Entities;
 using MediatR;
-using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging;
 
 namespace ICMarkets.Application.Features.Ingestion;
@@ -30,7 +31,9 @@ public sealed record IngestAllChainsResult(
 // persists them one at a time. See README.md "Concurrency" for why this is
 // Task-based (Channels + Parallel.ForEachAsync) and not PLINQ.
 public sealed class IngestAllChainsCommandHandler(
-    IServiceScopeFactory scopeFactory,
+    IChainInfoSource chainInfoSource,
+    IUnitOfWorkFactory unitOfWorkFactory,
+    SnapshotMapper mapper,
     TimeProvider clock,
     ILogger<IngestAllChainsCommandHandler> logger)
     : IRequestHandler<IngestAllChainsCommand, IngestAllChainsResult>
@@ -82,12 +85,8 @@ public sealed class IngestAllChainsCommandHandler(
                 new ParallelOptions { MaxDegreeOfParallelism = MaxFetchConcurrency, CancellationToken = ct },
                 async (network, token) =>
                 {
-                    // fresh DI scope per branch: IBlockCypherClient itself is
-                    // safe to share, but this keeps the same scoping discipline
-                    // as the consumer side and avoids any future dependency on
-                    // this client becoming scoped/stateful surprising someone.
-                    using var scope = scopeFactory.CreateScope();
-                    var client = scope.ServiceProvider.GetRequiredService<IBlockCypherClient>();
+                    // the source is injected directly: an HttpClient-based adapter is
+                    // thread-safe, so the parallel branches simply share it.
                     var networkKey = NetworkKey.ToKey(network);
 
                     using var fetchActivity = IngestionTelemetry.ActivitySource.StartActivity("fetch-chain-info");
@@ -96,7 +95,7 @@ public sealed class IngestAllChainsCommandHandler(
                     var stopwatch = Stopwatch.StartNew();
                     try
                     {
-                        var result = await client.GetChainInfoAsync(network, token);
+                        var result = await chainInfoSource.GetChainInfoAsync(network, token);
                         // stamped here, at fetch time - not at persist time, which
                         // can be later if the item waits in the bounded channel.
                         var fetchedAt = clock.GetUtcNow();
@@ -132,22 +131,20 @@ public sealed class IngestAllChainsCommandHandler(
     {
         // Single consumer: persists run one at a time, so there's no
         // concurrent SaveChanges and no extra locking needed. But each item
-        // gets its OWN DI scope (and so its own AppDbContext): a failed
+        // gets its OWN unit of work (and so its own AppDbContext): a failed
         // SaveChanges leaves the rejected entity in the ChangeTracker as
         // Added, and a shared context would retry inserting it together with
         // the next valid entity - one bad response would then fail every
-        // later network too. A poisoned context is simply discarded with its
-        // scope. For 5 networks the per-item scope cost is negligible.
+        // later network too. A poisoned unit of work is simply discarded.
+        // The factory port hides how it is built (a DI scope in Infrastructure).
+        // For 5 networks the per-item cost is negligible.
         var succeeded = new List<BlockchainSnapshotDto>();
 
         await foreach (var item in reader.ReadAllAsync(ct))
         {
             try
             {
-                using var scope = scopeFactory.CreateScope();
-                var sender = scope.ServiceProvider.GetRequiredService<ISender>();
-                var dto = await sender.Send(new PersistSnapshotCommand(item.Network, item.Result, item.FetchedAt), ct);
-                succeeded.Add(dto);
+                succeeded.Add(await PersistAsync(item, ct));
             }
             // same rule as the fetch side: only a cancelled token aborts the batch.
             catch (Exception ex) when (ex is not OperationCanceledException || !ct.IsCancellationRequested)
@@ -159,6 +156,43 @@ public sealed class IngestAllChainsCommandHandler(
         }
 
         return succeeded;
+    }
+
+    // CreatedAt is the FETCH time stamped by the producer, deliberately not read from the
+    // clock here: under backpressure an item can wait in the channel before it is persisted,
+    // and the history must reflect when the data was fetched, not when the row was written.
+    private async Task<BlockchainSnapshotDto> PersistAsync(FetchedChain item, CancellationToken ct)
+    {
+        using var activity = IngestionTelemetry.ActivitySource.StartActivity("persist-snapshot");
+        var networkKey = NetworkKey.ToKey(item.Network);
+        activity?.SetTag("icmarkets.network", networkKey);
+
+        var info = item.Result.Info;
+        var snapshot = BlockchainSnapshot.Create(
+            network: item.Network,
+            name: info.Name,
+            height: info.Height,
+            hash: info.Hash,
+            time: info.Time,
+            latestUrl: info.LatestUrl,
+            previousHash: info.PreviousHash,
+            previousUrl: info.PreviousUrl,
+            peerCount: info.PeerCount,
+            unconfirmedCount: info.UnconfirmedCount,
+            feeRates: info.FeeRates,
+            gasPrices: info.GasPrices,
+            lastForkHeight: info.LastForkHeight,
+            lastForkHash: info.LastForkHash,
+            rawJson: item.Result.RawJson,
+            createdAt: item.FetchedAt);
+
+        await using var unitOfWork = unitOfWorkFactory.Create();
+        await unitOfWork.Snapshots.AddAsync(snapshot, ct);
+        await unitOfWork.SaveChangesAsync(ct);
+
+        IngestionTelemetry.SnapshotsIngested.Add(1, IngestionTelemetry.NetworkTag(networkKey));
+
+        return mapper.ToDto(snapshot);
     }
 
     private sealed record FetchedChain(Network Network, ChainInfoResult Result, DateTimeOffset FetchedAt);

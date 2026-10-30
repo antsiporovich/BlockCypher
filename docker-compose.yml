@@ -39,6 +39,12 @@ services:
       BlockCypher__Token: "${BlockCypher__Token:-}"
       Outbox__Enabled: "true"
       Outbox__HostName: "rabbitmq"
+      # the gateway sits in front: trust X-Forwarded-* only from the compose network's
+      # private ranges (Docker assigns user networks from 172.16/12 or 192.168/16),
+      # not from anyone who can reach port 8080 directly.
+      ForwardedHeaders__Enabled: "true"
+      ForwardedHeaders__KnownNetworks__0: "172.16.0.0/12"
+      ForwardedHeaders__KnownNetworks__1: "192.168.0.0/16"
 
   rabbitmq:
     # pinned, not :3-management - a floating major tag means `docker compose
@@ -46,6 +52,14 @@ services:
     # the pinned SQL Server image above. Verify this still resolves on Docker
     # Hub before relying on it long-term.
     image: rabbitmq:4.2.7-management
+    # Durable state (persistent messages, the durable queue) lives under /var/lib/rabbitmq in a
+    # directory named after the NODE, and the node name defaults to rabbit@<hostname>. A
+    # recreated container gets a random hostname = a different node = a fresh empty store:
+    # acked messages the outbox already marked processed would silently vanish. So BOTH are
+    # pinned: a stable hostname AND a named volume. `docker compose down` (without -v) keeps it.
+    hostname: rabbitmq
+    volumes:
+      - rabbitmq-data:/var/lib/rabbitmq
     ports:
       - "5672:5672"   # AMQP
       - "15672:15672" # management UI (guest/guest)
@@ -94,3 +108,4 @@ services:
 
 volumes:
   mssql-data:
+  rabbitmq-data:

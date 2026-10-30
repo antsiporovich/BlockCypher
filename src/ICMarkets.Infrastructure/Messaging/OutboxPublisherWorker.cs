@@ -33,6 +33,7 @@ public sealed class OutboxPublisherWorker(
         }
 
         var interval = TimeSpan.FromSeconds(Math.Max(opts.PollIntervalSeconds, 1));
+        var publishTimeout = TimeSpan.FromSeconds(Math.Max(opts.PublishTimeoutSeconds, 1));
 
         using var timer = new PeriodicTimer(interval);
         do
@@ -68,8 +69,7 @@ public sealed class OutboxPublisherWorker(
                     // one failed publish stops this tick - don't mark later
                     // rows processed out of order, don't swallow the error,
                     // just retry from the first unprocessed row next tick.
-                    await publisher.PublishAsync(
-                        message.Id.ToString(CultureInfo.InvariantCulture), message.Type, message.Payload, stoppingToken);
+                    await PublishWithBudgetAsync(publisher, message, publishTimeout, stoppingToken);
 
                     message.MarkProcessed(DateTimeOffset.UtcNow);
                     await db.SaveChangesAsync(stoppingToken);
@@ -89,5 +89,28 @@ public sealed class OutboxPublisherWorker(
                 logger.LogError(ex, "Outbox publish run failed unexpectedly.");
             }
         } while (await timer.WaitForNextTickAsync(stoppingToken));
+    }
+
+    // Per-operation budget. Only the host's stoppingToken may abort the worker; the budget
+    // firing means "this publish hung" - reported as a TimeoutException (not an OCE, which
+    // would look like a shutdown), so the tick ends, the row stays unprocessed and the next
+    // tick makes a fresh attempt. A late broker confirm for the abandoned attempt can still
+    // arrive - hence consumers de-duplicate on MessageId.
+    private static async Task PublishWithBudgetAsync(
+        IEventPublisher publisher, OutboxMessage message, TimeSpan budget, CancellationToken stoppingToken)
+    {
+        using var attempt = CancellationTokenSource.CreateLinkedTokenSource(stoppingToken);
+        attempt.CancelAfter(budget);
+
+        try
+        {
+            await publisher.PublishAsync(
+                message.Id.ToString(CultureInfo.InvariantCulture), message.Type, message.Payload, attempt.Token);
+        }
+        catch (OperationCanceledException) when (!stoppingToken.IsCancellationRequested)
+        {
+            throw new TimeoutException(
+                $"Publishing outbox message {message.Id} did not complete within {budget.TotalSeconds:0.#}s; it will be retried.");
+        }
     }
 }
