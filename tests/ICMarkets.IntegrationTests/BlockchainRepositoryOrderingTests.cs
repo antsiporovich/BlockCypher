@@ -3,6 +3,7 @@ using ICMarkets.Application.Features.History;
 using ICMarkets.Application.Mapping;
 using ICMarkets.Domain;
 using ICMarkets.Domain.Entities;
+using ICMarkets.Domain.ValueObjects;
 using ICMarkets.Infrastructure.Persistence;
 using MediatR;
 using Microsoft.Data.Sqlite;
@@ -176,8 +177,8 @@ public sealed class BlockchainRepositoryOrderingTests : IDisposable
                 previousUrl: null,
                 peerCount: 0,
                 unconfirmedCount: 0,
-                feeRates: null,
-                gasPrices: null,
+                feeRates: network == Network.EthMain ? null : new FeeRates(1, 1, 1),
+                gasPrices: network == Network.EthMain ? new GasPrices(1, 1, 1, null, null, null, null) : null,
                 lastForkHeight: null,
                 lastForkHash: null,
                 rawJson: "{}",

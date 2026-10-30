@@ -64,6 +64,15 @@ public class BlockchainSnapshot
         if (lastForkHeight is { } forkHeight)
             ArgumentOutOfRangeException.ThrowIfNegative(forkHeight);
 
+        // Exactly one pricing family, matched to the network: ETH is account-based (gas),
+        // every other chain is UTXO-based (fee-per-kb). The adapter checks the wire payload;
+        // the aggregate must be impossible to build inconsistent from any source.
+        var usesGas = network == Network.EthMain;
+        if (usesGas && (gasPrices is null || feeRates is not null))
+            throw new ArgumentException("An Ethereum snapshot must carry gas prices and no fee rates.", nameof(gasPrices));
+        if (!usesGas && (feeRates is null || gasPrices is not null))
+            throw new ArgumentException("A non-Ethereum snapshot must carry fee rates and no gas prices.", nameof(feeRates));
+
         var snapshot = new BlockchainSnapshot
         {
             Network = network,

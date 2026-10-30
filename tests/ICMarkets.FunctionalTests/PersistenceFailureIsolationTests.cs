@@ -6,6 +6,7 @@ using AwesomeAssertions;
 using ICMarkets.Application.Features.Ingestion;
 using ICMarkets.Domain;
 using ICMarkets.Domain.Entities;
+using ICMarkets.Domain.ValueObjects;
 using ICMarkets.Infrastructure.Persistence;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.EntityFrameworkCore.Diagnostics;
@@ -102,7 +103,10 @@ public sealed class PersistenceFailureIsolationTests : IClassFixture<SaveFailure
     private static BlockchainSnapshot NewSnapshot(Network network) =>
         BlockchainSnapshot.Create(
             network, "X.main", 1, "hash", DateTimeOffset.UtcNow,
-            null, null, null, 1, 1, null, null, null, null, "{}", DateTimeOffset.UtcNow);
+            null, null, null, 1, 1,
+            network == Network.EthMain ? null : new FeeRates(1, 1, 1),
+            network == Network.EthMain ? new GasPrices(1, 1, 1, null, null, null, null) : null,
+            null, null, "{}", DateTimeOffset.UtcNow);
 }
 
 public sealed class SaveFailureApiFactory : ApiFactory

@@ -1,6 +1,7 @@
 using AwesomeAssertions;
 using ICMarkets.Domain;
 using ICMarkets.Domain.Entities;
+using ICMarkets.Domain.ValueObjects;
 using ICMarkets.Infrastructure.Persistence;
 using MediatR;
 using Microsoft.Data.Sqlite;
@@ -59,7 +60,7 @@ public sealed class PostCommitNotificationTests : IDisposable
         return BlockchainSnapshot.Create(
             network: Network.BtcMain, name: "BTC.main", height: 1, hash: "h", time: t,
             latestUrl: null, previousHash: null, previousUrl: null, peerCount: 0, unconfirmedCount: 0,
-            feeRates: null, gasPrices: null, lastForkHeight: null, lastForkHash: null,
+            feeRates: new FeeRates(1, 1, 1), gasPrices: null, lastForkHeight: null, lastForkHash: null,
             rawJson: "{}", createdAt: t);
     }
 

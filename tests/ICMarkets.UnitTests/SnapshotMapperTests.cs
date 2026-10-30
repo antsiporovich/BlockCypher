@@ -93,7 +93,7 @@ public sealed class SnapshotMapperTests
         var createdAt = DateTimeOffset.UtcNow;
         var snapshot = BlockchainSnapshot.Create(
             Network.LtcMain, "LTC.main", 1, "hash", createdAt,
-            null, null, null, 0, 0, null, null, null, null,
+            null, null, null, 0, 0, new FeeRates(1, 1, 1), null, null, null,
             rawJson: "{\"secret\":true}", createdAt: createdAt);
 
         var dto = _mapper.ToDto(snapshot);

@@ -14,12 +14,12 @@ using Microsoft.Extensions.DependencyInjection;
 namespace ICMarkets.FunctionalTests;
 
 // The upstream answers one network with "200 OK" and then never sends the body.
-// GetStringAsync reads the body AFTER the resilience pipeline has returned, so only
-// the client's own fetch budget can end that wait - and when it does, the failure is
-// an OperationCanceledException while the caller's token is NOT cancelled. Before the
-// fix that was treated as caller cancellation: it propagated and took the whole batch
-// down (0 of 5 instead of 4 of 5). This runs the REAL client registration (resilience
-// handler included); only the primary handler is swapped to produce the stalled body.
+// The body is buffered inside the resilience pipeline, and that read honours the
+// client's fetch budget. When the budget fires, the caller's token is NOT cancelled,
+// so the failure stays on that one network instead of aborting the batch. This runs
+// the REAL client registration (resilience handler included); only the primary handler
+// is swapped to produce the stalled body. The 2s budget is shorter than the resilience
+// attempt timeout, so this test still ends on the budget rather than on a retry.
 public sealed class SlowBodyIsolationTests : IClassFixture<SlowBodyApiFactory>
 {
     private static readonly JsonSerializerOptions JsonOptions = new(JsonSerializerDefaults.Web)

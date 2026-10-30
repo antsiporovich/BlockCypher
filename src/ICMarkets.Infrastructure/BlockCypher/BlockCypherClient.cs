@@ -16,10 +16,10 @@ public class BlockCypherClient(HttpClient http, IOptions<BlockCypherOptions> opt
 
         var requestUri = string.IsNullOrWhiteSpace(opts.Token) ? path : $"{path}?token={opts.Token}";
 
-        // One explicit budget for the whole fetch. GetStringAsync reads the body AFTER
-        // the resilience pipeline has returned the headers, so neither Polly's attempt
-        // nor total timeout covers a body that stalls; this linked token does, and it
-        // is passed down so it also bounds the headers phase and the retries.
+        // One explicit budget for the whole fetch, passed into the pipeline. The body is
+        // buffered inside the resilience retry (ResponseBufferingHandler), so a transport
+        // drop mid-body is retried by that same policy. This token still bounds a body
+        // that stalls - LoadIntoBufferAsync honours it - and it also bounds headers and retries.
         var budget = TimeSpan.FromSeconds(Math.Max(opts.FetchTimeoutSeconds, 1));
         using var budgetCts = CancellationTokenSource.CreateLinkedTokenSource(ct);
         budgetCts.CancelAfter(budget);

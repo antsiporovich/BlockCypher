@@ -48,16 +48,18 @@ public static class DependencyInjection
             });
 
         // Pipeline order is registration order, outermost first:
-        //   resilience (total timeout -> retry -> breaker -> attempt timeout) -> rate limiter -> network.
-        // The limiter sits INSIDE the retry strategy, so every real attempt - including each
-        // retry of a 429/5xx - takes a permit from the one process-wide budget.
+        //   resilience (total timeout -> retry -> breaker -> attempt timeout)
+        //   -> body buffering -> rate limiter -> network.
+        // Buffering reads the body inside the retry, so a mid-body transport drop is a normal
+        // retryable failure of the one existing policy. The limiter sits inside both, so every
+        // real attempt (headers + body), including each retry, takes one permit.
         blockCypherClient
             .AddStandardResilienceHandler(resilience =>
             {
-                // The standard handler's default predicate already treats 429, 5xx and
-                // timeouts as transient and retries them with jittered exponential
-                // backoff - and HttpRetryStrategyOptions.ShouldRetryAfterHeader is true
-                // by default, so a Retry-After header (BOTH delta-seconds and HTTP-date
+                // The standard handler's default predicate already treats 429, 5xx,
+                // HttpRequestException and timeouts as transient and retries them with
+                // jittered exponential backoff - and HttpRetryStrategyOptions.ShouldRetryAfterHeader
+                // is true by default, so a Retry-After header (BOTH delta-seconds and HTTP-date
                 // forms) already sets the retry delay. Deliberately NO custom
                 // DelayGenerator: a hand-rolled one that read only Retry-After.Delta
                 // silently ignored the date form and retried too early.
@@ -65,6 +67,7 @@ public static class DependencyInjection
                 resilience.Retry.BackoffType = DelayBackoffType.Exponential;
                 resilience.Retry.UseJitter = true;
             });
+        blockCypherClient.AddHttpMessageHandler(() => new ResponseBufferingHandler());
         blockCypherClient.AddHttpMessageHandler(sp =>
             new RateLimitingHandler(sp.GetRequiredService<BlockCypherRateLimiter>()));
 
