@@ -50,6 +50,16 @@ public class BlockchainSnapshot
         string rawJson,
         DateTimeOffset createdAt)
     {
+        // The entity guards its own invariants rather than trusting every caller: the external
+        // payload is validated in the adapter, but a snapshot of default values must be
+        // impossible to construct from any other path too.
+        ArgumentException.ThrowIfNullOrWhiteSpace(name);
+        ArgumentException.ThrowIfNullOrWhiteSpace(hash);
+        ArgumentException.ThrowIfNullOrWhiteSpace(rawJson);
+        ArgumentOutOfRangeException.ThrowIfNegative(height);
+        ArgumentOutOfRangeException.ThrowIfNegative(peerCount);
+        ArgumentOutOfRangeException.ThrowIfNegative(unconfirmedCount);
+
         var snapshot = new BlockchainSnapshot
         {
             Network = network,

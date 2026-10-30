@@ -6,6 +6,7 @@ using ICMarkets.Domain.Events;
 using ICMarkets.Infrastructure.Messaging;
 using MediatR;
 using Microsoft.EntityFrameworkCore;
+using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
 
 namespace ICMarkets.Infrastructure.Persistence;
@@ -14,7 +15,11 @@ namespace ICMarkets.Infrastructure.Persistence;
 // integration tests can construct the context with `new AppDbContext(options,
 // publisher)` without wiring options; at runtime DI always injects the real
 // IOptions<OutboxOptions>. Null => outbox disabled (the write is gated below).
-public class AppDbContext(DbContextOptions<AppDbContext> options, IPublisher publisher, IOptions<OutboxOptions>? outboxOptions = null)
+public class AppDbContext(
+    DbContextOptions<AppDbContext> options,
+    IPublisher publisher,
+    IOptions<OutboxOptions>? outboxOptions = null,
+    ILogger<AppDbContext>? logger = null)
     : DbContext(options), IUnitOfWork
 {
     // Domain events whose outbox row is already staged in this context's change
@@ -133,10 +138,25 @@ public class AppDbContext(DbContextOptions<AppDbContext> options, IPublisher pub
         foreach (var entry in ChangeTracker.Entries<BlockchainSnapshot>())
             entry.Entity.ClearDomainEvents();
 
+        // In-process notifications run AFTER the commit, so they are best-effort: the data is
+        // already durable, and a throwing subscriber must not turn a successful save into a
+        // failed one (the caller would report the network as failed, retry and duplicate it).
+        // The reliable side-effect path is the transactional outbox above; these local
+        // notifications are for observation only. Only a real cancellation propagates.
         foreach (var domainEvent in pendingEvents)
         {
-            if (domainEvent is SnapshotIngested ingested)
+            if (domainEvent is not SnapshotIngested ingested)
+                continue;
+
+            try
+            {
                 await publisher.Publish(new ICMarkets.Application.Notifications.SnapshotIngestedNotification(ingested), ct);
+            }
+            catch (Exception ex) when (ex is not OperationCanceledException || !ct.IsCancellationRequested)
+            {
+                logger?.LogError(ex,
+                    "A post-commit SnapshotIngested subscriber failed; the snapshot was saved and the failure is ignored.");
+            }
         }
 
         return result;

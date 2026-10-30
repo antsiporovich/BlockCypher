@@ -149,7 +149,7 @@ dotnet run -c Release --project tests/ICMarkets.PerformanceTests       # Benchma
 ```
 
 - **Unit** (`tests/ICMarkets.UnitTests`) — command/query handlers, validators, the Mapperly mapper and
-  BlockCypher JSON deserialization, with NSubstitute doubles for `IBlockCypherClient`/`ISender`.
+  BlockCypher JSON deserialization, with NSubstitute doubles for `IChainInfoSource`/`ISender` and a hand-written fake `IUnitOfWorkFactory`.
 - **Integration** (`tests/ICMarkets.IntegrationTests`) — the repository and EF Core migrations against a
   **real SQL Server** container via Testcontainers.MsSql (one shared container per test assembly). Without
   Docker the SQL Server tests are reported as **Skipped** with a reason, never as Passed; in CI
@@ -206,7 +206,9 @@ variables (`Database__Provider`, etc. — the compose file shows this).
   explicit `MaxDegreeOfParallelism`, so concurrency is deliberately bounded rather than an unbounded
   fan-out that would trip BlockCypher's rate limiter. That cap bounds ONE batch only - it is a
   concurrency limit, not a rate limit. The rate guarantee comes from a process-wide, time-based
-  `TokenBucketRateLimiter` with a one-token bucket (`BlockCypher:RequestsPerSecond`, default 3, so requests are spaced ~333 ms apart) in the HTTP pipeline, placed
+  minimum-interval gate (`BlockCypher:RequestsPerSecond`, default 3): consecutive requests are at least
+  1/N s (~334 ms) apart, so at most N leave in ANY one-second window - a strict limit, no burst (a token
+  bucket only bounds the average and can release two requests milliseconds apart). It sits in the HTTP pipeline, placed
   inside the retry strategy so every real attempt, retries included, takes a permit; all `POST /ingest`
   calls and the background worker share it, and callers over the budget queue instead of failing.
   Limits worth stating plainly: it is per process (several replicas would need a distributed limiter,
@@ -267,7 +269,7 @@ Kubernetes — to where it lives in this codebase, rather than leaving it implic
 |---|---|
 | Multithreading, concurrency, thread safety, fault tolerance | Bounded `System.Threading.Channels` + `Parallel.ForEachAsync` ingestion pipeline, a fresh unit of work per persisted item (`IUnitOfWorkFactory` port), per-network failure isolation — see "Design decisions & trade-offs" above and ADR 0004. |
 | Clean Architecture + Vertical Slice + CQRS | Four-layer Clean Architecture with feature folders (`Application/Features/{Ingestion,History,Networks}`) inside it; CQRS via MediatR. See "Architecture" and "Design patterns used" above. |
-| Domain-driven | `BlockchainSnapshot` as a rich entity with a static factory, `FeeRates`/`GasPrices` value objects, a `SnapshotIngested` domain event — deliberately scoped short of full tactical DDD, which five snapshot tables don't justify. |
+| Domain-driven | `BlockchainSnapshot` as an entity whose static factory enforces its own invariants (non-empty name/hash/raw payload, non-negative height and counts), `FeeRates`/`GasPrices` value objects, a `SnapshotIngested` domain event — deliberately scoped short of full tactical DDD, which five snapshot tables don't justify. |
 | Event-driven design (Kafka/AWS SQS/RabbitMQ) | Transactional outbox + **RabbitMQ** publisher on `SnapshotIngested` (`Infrastructure/Messaging/`), off by default, on in `docker-compose.yml`. A fanout exchange means a Kafka or SQS consumer could subscribe without this publisher changing; swapping the exchange for a Kafka topic is a new `IEventPublisher` implementation, not a redesign. |
 | Saga pattern for distributed transactions | Not implemented — this service has one aggregate and no cross-service transaction to coordinate. Noted here as the natural next step if ingestion and persistence ever split into separate services. |
 | OpenTelemetry, Prometheus, Grafana, Elastic/Kibana | Full OTel traces/metrics/logs, `/metrics` scraped by Prometheus, a provisioned Grafana dashboard in `docker-compose.yml`, and Elastic Common Schema-formatted console logs (Kibana-ingestible without standing up a full ELK stack). |

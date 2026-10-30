@@ -61,7 +61,7 @@ public sealed class PersistenceFailureIsolationTests : IClassFixture<SaveFailure
         _factory.Interceptor.Rejections.Should().BeGreaterThan(0);
 
         var result = await response.Content.ReadFromJsonAsync<IngestAllChainsResult>(JsonOptions);
-        result!.Failed.Should().ContainSingle(f => f.Network == victim);
+        result!.Failed.Should().ContainSingle(f => f.Network == NetworkKey.ToKey(victim!.Value));
         result.Succeeded.Should().HaveCount(4);
 
         // ...and the four rows really are in the database, the victim's is not.

@@ -40,7 +40,7 @@ public sealed class SlowBodyIsolationTests : IClassFixture<SlowBodyApiFactory>
 
         var result = await response.Content.ReadFromJsonAsync<IngestAllChainsResult>(JsonOptions);
         result!.Succeeded.Should().HaveCount(4, "failures were: {0}", string.Join(" | ", result.Failed.Select(f => $"{f.Network}: {f.Error}")));
-        result.Failed.Should().ContainSingle(f => f.Network == Network.LtcMain);
+        result.Failed.Should().ContainSingle(f => f.Network == "ltc-main");
     }
 }
 
@@ -52,7 +52,8 @@ public sealed class SlowBodyApiFactory : ApiFactory
 
         builder.ConfigureAppConfiguration((_, config) => config.AddInMemoryCollection(new Dictionary<string, string?>
         {
-            // short budget so the test takes seconds, not the production 45s.
+            // short budget so the test takes seconds, not the production 45s. Safe at 2s:
+            // healthy responses are in-process and instant, only the stalled body waits it out.
             ["BlockCypher:FetchTimeoutSeconds"] = "2",
         }));
 
@@ -61,20 +62,38 @@ public sealed class SlowBodyApiFactory : ApiFactory
                 .ConfigurePrimaryHttpMessageHandler(() => new StalledLtcBodyHandler()));
     }
 
-    // Everything goes to the real WireMock server except /ltc/main, which gets
-    // 200 + headers immediately and a body stream that never produces a byte.
+    // The four healthy networks are answered IN-PROCESS with their fixture, instantly - no
+    // socket, no WireMock, nothing whose latency can vary under a parallel test run, so the
+    // fetch budget can never be missed by a healthy request. Only /ltc/main gets 200 + headers
+    // immediately and a body stream that never produces a byte. The real client, resilience
+    // pipeline, rate gate and persistence still run; real HTTP integration is covered by the
+    // WireMock-based tests.
     private sealed class StalledLtcBodyHandler : HttpMessageHandler
     {
-        private readonly HttpMessageInvoker _inner = new(new SocketsHttpHandler());
+        private static readonly Dictionary<string, string> Healthy = new()
+        {
+            ["/btc/main"] = Fixtures.BtcMain,
+            ["/eth/main"] = Fixtures.EthMain,
+            ["/dash/main"] = Fixtures.DashMain,
+            ["/btc/test3"] = Fixtures.BtcTest3,
+        };
 
         protected override Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken ct)
         {
-            if (!request.RequestUri!.AbsolutePath.EndsWith("/ltc/main", StringComparison.Ordinal))
-                return _inner.SendAsync(request, ct);
+            var path = request.RequestUri!.AbsolutePath;
 
-            var content = new StreamContent(new StalledStream());
-            content.Headers.ContentType = new("application/json");
-            return Task.FromResult(new HttpResponseMessage(HttpStatusCode.OK) { Content = content });
+            if (path.EndsWith("/ltc/main", StringComparison.Ordinal))
+            {
+                var stalled = new StreamContent(new StalledStream());
+                stalled.Headers.ContentType = new("application/json");
+                return Task.FromResult(new HttpResponseMessage(HttpStatusCode.OK) { Content = stalled });
+            }
+
+            var fixture = Healthy.First(kv => path.EndsWith(kv.Key, StringComparison.Ordinal)).Value;
+            return Task.FromResult(new HttpResponseMessage(HttpStatusCode.OK)
+            {
+                Content = new StringContent(fixture, System.Text.Encoding.UTF8, "application/json"),
+            });
         }
     }
 

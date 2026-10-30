@@ -15,9 +15,12 @@ namespace ICMarkets.Application.Features.Ingestion;
 public sealed record IngestAllChainsCommand : IRequest<IngestAllChainsResult>;
 
 /// <summary>One network's ingestion failure, with the exception message.</summary>
-/// <param name="Network">The network key that failed.</param>
+/// <param name="Network">The network key that failed (e.g. <c>eth-main</c>) - the same key format as <c>BlockchainSnapshotDto.Network</c>.</param>
 /// <param name="Error">The exception message from the failed fetch or persist.</param>
-public sealed record IngestFailure(Network Network, string Error);
+// The key is a string on purpose: an enum here would put an integer-or-string ambiguity into the
+// wire contract (native OpenAPI documents enums as integers, the MVC converter writes names) and
+// would make success and failure use different spellings of the same network.
+public sealed record IngestFailure(string Network, string Error);
 
 /// <summary>Result of ingesting all configured networks in one batch.</summary>
 /// <param name="Succeeded">Snapshots that were fetched and persisted successfully.</param>
@@ -95,11 +98,13 @@ public sealed class IngestAllChainsCommandHandler(
                     var stopwatch = Stopwatch.StartNew();
                     try
                     {
+                        // stamped BEFORE the call: CreatedAt is the moment the API was asked,
+                        // not when the answer was received/parsed (which varies with latency,
+                        // rate-limit queueing and retries) and certainly not when the row is
+                        // persisted (later still if the item waits in the bounded channel).
+                        var requestedAt = clock.GetUtcNow();
                         var result = await chainInfoSource.GetChainInfoAsync(network, token);
-                        // stamped here, at fetch time - not at persist time, which
-                        // can be later if the item waits in the bounded channel.
-                        var fetchedAt = clock.GetUtcNow();
-                        await writer.WriteAsync(new FetchedChain(network, result, fetchedAt), token);
+                        await writer.WriteAsync(new FetchedChain(network, result, requestedAt), token);
                     }
                     // Discriminate by TOKEN, not by exception type: a timeout also surfaces
                     // as an OperationCanceledException while `token` is NOT cancelled, and
@@ -108,7 +113,7 @@ public sealed class IngestAllChainsCommandHandler(
                     catch (Exception ex) when (ex is not OperationCanceledException || !token.IsCancellationRequested)
                     {
                         logger.LogWarning(ex, "Fetch failed for {Network}", network);
-                        failures.Add(new IngestFailure(network, ex.Message));
+                        failures.Add(new IngestFailure(NetworkKey.ToKey(network), ex.Message));
                         IngestionTelemetry.IngestionFailures.Add(1, IngestionTelemetry.NetworkTag(networkKey));
                     }
                     finally
@@ -150,7 +155,7 @@ public sealed class IngestAllChainsCommandHandler(
             catch (Exception ex) when (ex is not OperationCanceledException || !ct.IsCancellationRequested)
             {
                 logger.LogWarning(ex, "Persist failed for {Network}", item.Network);
-                failures.Add(new IngestFailure(item.Network, ex.Message));
+                failures.Add(new IngestFailure(NetworkKey.ToKey(item.Network), ex.Message));
                 IngestionTelemetry.IngestionFailures.Add(1, IngestionTelemetry.NetworkTag(NetworkKey.ToKey(item.Network)));
             }
         }
@@ -158,9 +163,10 @@ public sealed class IngestAllChainsCommandHandler(
         return succeeded;
     }
 
-    // CreatedAt is the FETCH time stamped by the producer, deliberately not read from the
-    // clock here: under backpressure an item can wait in the channel before it is persisted,
-    // and the history must reflect when the data was fetched, not when the row was written.
+    // CreatedAt is the REQUEST time stamped by the producer just before it asked BlockCypher,
+    // deliberately not read from the clock here: under backpressure an item can wait in the
+    // channel before it is persisted, and the history must reflect when the data was
+    // requested, not when the row was written.
     private async Task<BlockchainSnapshotDto> PersistAsync(FetchedChain item, CancellationToken ct)
     {
         using var activity = IngestionTelemetry.ActivitySource.StartActivity("persist-snapshot");
@@ -184,7 +190,7 @@ public sealed class IngestAllChainsCommandHandler(
             lastForkHeight: info.LastForkHeight,
             lastForkHash: info.LastForkHash,
             rawJson: item.Result.RawJson,
-            createdAt: item.FetchedAt);
+            createdAt: item.RequestedAt);
 
         await using var unitOfWork = unitOfWorkFactory.Create();
         await unitOfWork.Snapshots.AddAsync(snapshot, ct);
@@ -195,5 +201,5 @@ public sealed class IngestAllChainsCommandHandler(
         return mapper.ToDto(snapshot);
     }
 
-    private sealed record FetchedChain(Network Network, ChainInfoResult Result, DateTimeOffset FetchedAt);
+    private sealed record FetchedChain(Network Network, ChainInfoResult Result, DateTimeOffset RequestedAt);
 }

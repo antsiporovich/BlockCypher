@@ -33,7 +33,7 @@ public sealed class ResponseValidationTests : IClassFixture<ApiFactory>
         {
             var result = await IngestAsync();
 
-            result.Failed.Should().ContainSingle(f => f.Network == ICMarkets.Domain.Network.EthMain)
+            result.Failed.Should().ContainSingle(f => f.Network == "eth-main")
                 .Which.Error.Should().Contain("Invalid BlockCypher response");
             result.Succeeded.Should().HaveCount(4);
             result.Succeeded.Should().NotContain(s => s.Network == "eth-main");
@@ -53,7 +53,7 @@ public sealed class ResponseValidationTests : IClassFixture<ApiFactory>
         {
             var result = await IngestAsync();
 
-            result.Failed.Should().ContainSingle(f => f.Network == ICMarkets.Domain.Network.LtcMain)
+            result.Failed.Should().ContainSingle(f => f.Network == "ltc-main")
                 .Which.Error.Should().Contain("LTC.main");
             result.Succeeded.Should().NotContain(s => s.Network == "ltc-main");
         }
@@ -71,7 +71,7 @@ public sealed class ResponseValidationTests : IClassFixture<ApiFactory>
         {
             var result = await IngestAsync();
 
-            result.Failed.Should().ContainSingle(f => f.Network == ICMarkets.Domain.Network.DashMain);
+            result.Failed.Should().ContainSingle(f => f.Network == "dash-main");
             result.Succeeded.Should().NotContain(s => s.Network == "dash-main");
         }
         finally

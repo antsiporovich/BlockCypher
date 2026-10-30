@@ -45,7 +45,7 @@ public sealed class IngestAllChainsCommandHandlerTests
         var result = await Handler(source, factory).Handle(new IngestAllChainsCommand(), CancellationToken.None);
 
         result.Succeeded.Should().HaveCount(4);
-        result.Failed.Should().ContainSingle(f => f.Network == Network.EthMain);
+        result.Failed.Should().ContainSingle(f => f.Network == "eth-main");
         result.Succeeded.Select(s => s.Network).Should().NotContain("eth-main");
         factory.Saved.Should().HaveCount(4);
     }
@@ -58,7 +58,7 @@ public sealed class IngestAllChainsCommandHandlerTests
         var result = await Handler(HealthySource(), factory).Handle(new IngestAllChainsCommand(), CancellationToken.None);
 
         result.Succeeded.Should().HaveCount(4);
-        result.Failed.Should().ContainSingle(f => f.Network == Network.LtcMain);
+        result.Failed.Should().ContainSingle(f => f.Network == "ltc-main");
         factory.Saved.Should().HaveCount(4);
         // one fresh unit of work per item, and every one - including the failed - disposed.
         factory.Created.Should().Be(5);
@@ -77,7 +77,7 @@ public sealed class IngestAllChainsCommandHandlerTests
     }
 
     [Fact]
-    public async Task Handle_CreatedAt_IsTheFetchTimeFromTheClock()
+    public async Task Handle_CreatedAt_IsTheRequestTimeFromTheClock()
     {
         var fetchTime = new DateTimeOffset(2026, 3, 4, 5, 6, 7, TimeSpan.Zero);
         var factory = new FakeUnitOfWorkFactory();
@@ -87,6 +87,33 @@ public sealed class IngestAllChainsCommandHandlerTests
 
         factory.Saved.Should().OnlyContain(s => s.CreatedAt == fetchTime);
         result.Succeeded.Should().OnlyContain(s => s.CreatedAt == fetchTime);
+    }
+
+    [Fact]
+    public async Task Handle_CreatedAt_IsStampedBeforeTheCall_NotWhenTheResponseArrives()
+    {
+        // the upstream call "takes" 7 seconds (the fake clock moves while it runs):
+        // CreatedAt must still be the moment the request was issued.
+        var requestTime = new DateTimeOffset(2026, 3, 4, 5, 6, 7, TimeSpan.Zero);
+        var clock = new FakeTimeProvider(requestTime);
+        var source = Substitute.For<IChainInfoSource>();
+        foreach (var network in Enum.GetValues<Network>())
+        {
+            source.GetChainInfoAsync(network, Arg.Any<CancellationToken>()).Returns(_ =>
+            {
+                clock.Advance(TimeSpan.FromSeconds(7));
+                return new ChainInfoResult(TestChainInfo(network), "{}");
+            });
+        }
+        var factory = new FakeUnitOfWorkFactory();
+
+        await Handler(source, factory, clock).Handle(new IngestAllChainsCommand(), CancellationToken.None);
+
+        // branches run in parallel, so a later branch may be stamped after an earlier one's
+        // response moved the clock. But the first stamp is always taken before any response:
+        // if CreatedAt were read after the call, even the earliest would be >= +7s.
+        factory.Saved.Should().HaveCount(Enum.GetValues<Network>().Length);
+        factory.Saved.Min(s => s.CreatedAt).Should().Be(requestTime);
     }
 
     [Fact]
