@@ -14,9 +14,11 @@ namespace ICMarkets.UnitTests.BlockCypher;
 public sealed class BlockCypherRateLimiterTests
 {
     // The fake clock is advanced in 5 ms steps and a grant is stamped when its continuation
-    // happens to run, so a recorded time can be off by one step. Assertions allow exactly
-    // that much; a token bucket misses by ~100+ ms.
+    // happens to run - on a loaded CI runner that can be several steps late. Only the two end
+    // timestamps of a measured span carry that skew, so the assertions allow Skew on each side
+    // (20 ms, with margin over what CI showed: ~8 ms). A token bucket misses by ~100+ ms.
     private static readonly TimeSpan Step = TimeSpan.FromMilliseconds(5);
+    private static readonly TimeSpan Skew = 4 * Step;
     private static readonly TimeSpan Interval = TimeSpan.FromTicks(TimeSpan.TicksPerSecond / 3);
 
     private static BlockCypherRateLimiter Create(int perSecond, FakeTimeProvider clock) =>
@@ -56,12 +58,12 @@ public sealed class BlockCypherRateLimiterTests
 
         var grants = await RunAsync(clock, limiter, 12);
 
-        var window = TimeSpan.FromSeconds(1) - 2 * Step;
+        var window = TimeSpan.FromSeconds(1) - 2 * Skew;
         var busiest = grants.Max(start => grants.Count(g => g >= start && g < start + window));
         busiest.Should().BeLessThanOrEqualTo(3);
         // and consecutive grants are at least 1/3 s apart.
         for (var i = 1; i < grants.Count; i++)
-            (grants[i] - grants[i - 1]).Should().BeGreaterThanOrEqualTo(Interval - Step);
+            (grants[i] - grants[i - 1]).Should().BeGreaterThanOrEqualTo(Interval - 2 * Skew);
     }
 
     [Fact]
@@ -77,8 +79,8 @@ public sealed class BlockCypherRateLimiterTests
         // a burst of three arrives at once: must not be released together.
         var grants = await RunAsync(clock, limiter, 3);
 
-        (grants[1] - grants[0]).Should().BeGreaterThanOrEqualTo(Interval - Step);
-        (grants[2] - grants[1]).Should().BeGreaterThanOrEqualTo(Interval - Step);
+        (grants[1] - grants[0]).Should().BeGreaterThanOrEqualTo(Interval - 2 * Skew);
+        (grants[2] - grants[1]).Should().BeGreaterThanOrEqualTo(Interval - 2 * Skew);
     }
 
     [Fact]
