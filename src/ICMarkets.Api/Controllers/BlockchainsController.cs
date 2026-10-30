@@ -30,21 +30,28 @@ public class BlockchainsController(ISender sender) : ControllerBase
     }
 
     /// <summary>
-    /// Returns stored snapshots for one network, newest first.
+    /// Returns stored snapshots for one network, newest first, using keyset (cursor) pagination.
     /// </summary>
+    /// <remarks>
+    /// Pagination is cursor-based, not offset-based: the response carries a <c>nextCursor</c>; pass it
+    /// back as <c>cursor</c> to fetch the next page. Because a cursor pins the last row of the previous
+    /// page, a snapshot ingested between two page requests (the background worker does this routinely)
+    /// can neither shift a page nor be duplicated across pages - which OFFSET paging cannot guarantee.
+    /// A null <c>nextCursor</c> means there are no more rows.
+    /// </remarks>
     /// <param name="network">Network key, e.g. <c>btc-main</c>, <c>eth-main</c>, <c>dash-main</c>, <c>btc-test3</c>, <c>ltc-main</c>.</param>
     /// <param name="take">Page size (1-200). Defaults to 50.</param>
-    /// <param name="skip">Number of rows to skip for paging. Defaults to 0.</param>
+    /// <param name="cursor">Opaque cursor from a previous page's <c>nextCursor</c>; omit for the first page.</param>
     /// <param name="ct">Cancellation token.</param>
-    /// <response code="200">The page of stored snapshots, ordered by <c>CreatedAt</c> descending.</response>
-    /// <response code="400">The network key is unrecognized, or <c>take</c>/<c>skip</c> is out of range.</response>
+    /// <response code="200">A page of stored snapshots ordered by <c>CreatedAt</c> descending, plus the next cursor.</response>
+    /// <response code="400">The network key is unrecognized, <c>take</c> is out of range, or <c>cursor</c> is malformed.</response>
     [HttpGet("{network}/history")]
-    [ProducesResponseType<List<BlockchainSnapshotDto>>(StatusCodes.Status200OK)]
+    [ProducesResponseType<HistoryPage>(StatusCodes.Status200OK)]
     [ProducesResponseType(StatusCodes.Status400BadRequest)]
-    public async Task<IActionResult> History(string network, [FromQuery] int take = 50, [FromQuery] int skip = 0, CancellationToken ct = default)
+    public async Task<IActionResult> History(string network, [FromQuery] int take = 50, [FromQuery] string? cursor = null, CancellationToken ct = default)
     {
-        var history = await sender.Send(new GetChainHistoryQuery(network, take, skip), ct);
-        return Ok(history);
+        var page = await sender.Send(new GetChainHistoryQuery(network, take, cursor), ct);
+        return Ok(page);
     }
 
     /// <summary>

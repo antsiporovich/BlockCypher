@@ -42,4 +42,26 @@ public sealed class OpenApiContractTests : IClassFixture<ApiFactory>
         networkSchema.GetProperty("type").GetString().Should().Be("string",
             "the schema must not describe the failed network as an integer");
     }
+
+    // /history is keyset-paginated: the published schema must describe the { items, nextCursor }
+    // envelope and expose a `cursor` query parameter (and no longer a `skip`), so a generated client
+    // paginates with the opaque cursor rather than an offset.
+    [Fact]
+    public async Task HistoryEndpoint_DocumentsTheKeysetEnvelope_AndACursorParameter()
+    {
+        var schema = await _client.GetFromJsonAsync<JsonElement>("/openapi/v1.json");
+
+        var historyPage = schema.GetProperty("components").GetProperty("schemas").GetProperty("HistoryPage");
+        var properties = historyPage.GetProperty("properties");
+        properties.TryGetProperty("items", out _).Should().BeTrue("the page exposes its rows under 'items'");
+        properties.TryGetProperty("nextCursor", out _).Should().BeTrue("the page exposes the continuation cursor");
+
+        var getHistory = schema.GetProperty("paths")
+            .GetProperty("/api/v1/blockchains/{network}/history")
+            .GetProperty("get");
+        var parameterNames = getHistory.GetProperty("parameters").EnumerateArray()
+            .Select(p => p.GetProperty("name").GetString())
+            .ToList();
+        parameterNames.Should().Contain("cursor").And.NotContain("skip");
+    }
 }

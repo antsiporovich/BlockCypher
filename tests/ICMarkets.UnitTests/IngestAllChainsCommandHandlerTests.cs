@@ -2,6 +2,7 @@ using System.Collections.Concurrent;
 using AwesomeAssertions;
 using ICMarkets.Application.Abstractions;
 using ICMarkets.Application.Dtos;
+using ICMarkets.Application.Features.History;
 using ICMarkets.Application.Features.Ingestion;
 using ICMarkets.Application.Mapping;
 using ICMarkets.Domain;
@@ -188,7 +189,7 @@ public sealed class IngestAllChainsCommandHandlerTests
                 return Task.CompletedTask;
             }
 
-            public Task<List<BlockchainSnapshot>> GetHistoryAsync(Network network, int take, int skip, CancellationToken ct) =>
+            public Task<List<BlockchainSnapshot>> GetHistoryAsync(Network network, int take, HistoryCursor? after, CancellationToken ct) =>
                 throw new NotSupportedException();
 
             public Task<BlockchainSnapshot?> GetLatestAsync(Network network, CancellationToken ct) =>

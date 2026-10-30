@@ -81,7 +81,29 @@ public static class ChainInfoValidation
                 problems.Add("gas price fields are not expected for this network");
         }
 
+        // Fees, gas prices and a fork height cannot be negative. The family checks above only prove
+        // the fields are PRESENT; a response with negative values (e.g. high_fee_per_kb = -300) would
+        // otherwise deserialize cleanly and be persisted. Zero stays valid (a low-fee tier of 0 is
+        // plausible) - reject only strictly-negative present values, so the bad body lands in `Failed`.
+        RejectNegative(problems, "high_fee_per_kb", dto.HighFeePerKb);
+        RejectNegative(problems, "medium_fee_per_kb", dto.MediumFeePerKb);
+        RejectNegative(problems, "low_fee_per_kb", dto.LowFeePerKb);
+        RejectNegative(problems, "high_gas_price", dto.HighGasPrice);
+        RejectNegative(problems, "medium_gas_price", dto.MediumGasPrice);
+        RejectNegative(problems, "low_gas_price", dto.LowGasPrice);
+        RejectNegative(problems, "base_fee", dto.BaseFee);
+        RejectNegative(problems, "high_priority_fee", dto.HighPriorityFee);
+        RejectNegative(problems, "medium_priority_fee", dto.MediumPriorityFee);
+        RejectNegative(problems, "low_priority_fee", dto.LowPriorityFee);
+        RejectNegative(problems, "last_fork_height", dto.LastForkHeight);
+
         return problems;
+    }
+
+    private static void RejectNegative(List<string> problems, string field, long? value)
+    {
+        if (value is < 0)
+            problems.Add($"'{field}' must not be negative");
     }
 
     // BlockCypher names chains "BTC.main", "ETH.main", "BTC.test3" ... - the

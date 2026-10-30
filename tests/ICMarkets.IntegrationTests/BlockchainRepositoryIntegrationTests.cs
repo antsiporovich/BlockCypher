@@ -1,4 +1,5 @@
 using AwesomeAssertions;
+using ICMarkets.Application.Features.History;
 using ICMarkets.Domain;
 using ICMarkets.Domain.Entities;
 using ICMarkets.Domain.ValueObjects;
@@ -99,13 +100,13 @@ public sealed class BlockchainRepositoryIntegrationTests : IAsyncLifetime
         await AddSnapshot(Network.EthMain, t0.AddMinutes(20));
         await _db!.SaveChangesAsync(CancellationToken.None);
 
-        var history = await _repo!.GetHistoryAsync(Network.EthMain, take: 50, skip: 0, CancellationToken.None);
+        var history = await _repo!.GetHistoryAsync(Network.EthMain, take: 50, after: null, CancellationToken.None);
 
         history.Select(s => s.CreatedAt).Should().Equal(t0.AddMinutes(30), t0.AddMinutes(20), t0.AddMinutes(10));
     }
 
     [SkippableFact]
-    public async Task GetHistoryAsync_HonoursTakeAndSkip_ForPagination()
+    public async Task GetHistoryAsync_KeysetPaginates_StrictlyAfterTheCursor()
     {
         Skip.IfNot(_fixture.IsAvailable, _fixture.UnavailableReason);
 
@@ -114,10 +115,17 @@ public sealed class BlockchainRepositoryIntegrationTests : IAsyncLifetime
             await AddSnapshot(Network.LtcMain, t0.AddMinutes(i));
         await _db!.SaveChangesAsync(CancellationToken.None);
 
-        // newest-first order is [t+4, t+3, t+2, t+1, t+0]; skip 1, take 2 -> [t+3, t+2]
-        var page = await _repo!.GetHistoryAsync(Network.LtcMain, take: 2, skip: 1, CancellationToken.None);
+        // newest-first order is [t+4, t+3, t+2, t+1, t+0]. First page of two fetches take + 1 = 3
+        // as the has-next probe; its last requested row (t+3) becomes the cursor.
+        var first = await _repo!.GetHistoryAsync(Network.LtcMain, take: 2, after: null, CancellationToken.None);
+        first.Should().HaveCount(3);
+        first.Take(2).Select(s => s.CreatedAt).Should().Equal(t0.AddMinutes(4), t0.AddMinutes(3));
 
-        page.Select(s => s.CreatedAt).Should().Equal(t0.AddMinutes(3), t0.AddMinutes(2));
+        var cursor = new HistoryCursor(first[1].CreatedAt, first[1].Id);
+        var page = await _repo.GetHistoryAsync(Network.LtcMain, take: 2, after: cursor, CancellationToken.None);
+
+        // strictly after t+3 -> [t+2, t+1]
+        page.Take(2).Select(s => s.CreatedAt).Should().Equal(t0.AddMinutes(2), t0.AddMinutes(1));
     }
 
     [SkippableFact]

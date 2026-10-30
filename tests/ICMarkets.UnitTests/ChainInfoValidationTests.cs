@@ -124,6 +124,43 @@ public sealed class ChainInfoValidationTests
     }
 
     [Fact]
+    public void Validate_NegativeFeeRatesAndForkHeight_AreRejected()
+    {
+        var dto = ValidBtc();
+        dto.HighFeePerKb = -300;
+        dto.MediumFeePerKb = -200;
+        dto.LowFeePerKb = -100;
+        dto.LastForkHeight = -1;
+
+        var problems = ChainInfoValidation.Validate(Network.BtcMain, dto, Now);
+
+        problems.Should().Contain(p => p.Contains("'high_fee_per_kb'") && p.Contains("negative"));
+        problems.Should().Contain(p => p.Contains("'medium_fee_per_kb'") && p.Contains("negative"));
+        problems.Should().Contain(p => p.Contains("'low_fee_per_kb'") && p.Contains("negative"));
+        problems.Should().Contain(p => p.Contains("'last_fork_height'") && p.Contains("negative"));
+    }
+
+    [Fact]
+    public void Validate_NegativeGasPrice_IsRejected()
+    {
+        var dto = ValidEth();
+        dto.LowGasPrice = -1;
+
+        ChainInfoValidation.Validate(Network.EthMain, dto, Now)
+            .Should().Contain(p => p.Contains("'low_gas_price'") && p.Contains("negative"));
+    }
+
+    [Fact]
+    public void Validate_ZeroFeeTier_IsAllowed()
+    {
+        // zero is a plausible low-fee tier; only strictly-negative values are rejected.
+        var dto = ValidBtc();
+        dto.LowFeePerKb = 0;
+
+        ChainInfoValidation.Validate(Network.BtcMain, dto, Now).Should().BeEmpty();
+    }
+
+    [Fact]
     public void EnsureValid_Invalid_ThrowsWithTheNetworkAndProblems()
     {
         var act = () => ChainInfoValidation.EnsureValid(Network.DashMain, new BlockCypherChainInfoDto(), Now);

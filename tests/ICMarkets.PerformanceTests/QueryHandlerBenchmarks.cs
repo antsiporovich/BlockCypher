@@ -1,5 +1,4 @@
 using BenchmarkDotNet.Attributes;
-using ICMarkets.Application.Dtos;
 using ICMarkets.Application.Features.History;
 using ICMarkets.Application.Mapping;
 
@@ -16,9 +15,9 @@ public class QueryHandlerBenchmarks
     {
         var repo = new FakeBlockchainRepository(SnapshotFixtures.Snapshots(50));
         _handler = new GetChainHistoryQueryHandler(repo, new SnapshotMapper());
-        _query = new GetChainHistoryQuery("btc-main", Take: 50, Skip: 0);
+        _query = new GetChainHistoryQuery("btc-main", Take: 50);
     }
 
     [Benchmark]
-    public Task<List<BlockchainSnapshotDto>> HandleHistoryQuery() => _handler.Handle(_query, CancellationToken.None);
+    public Task<HistoryPage> HandleHistoryQuery() => _handler.Handle(_query, CancellationToken.None);
 }

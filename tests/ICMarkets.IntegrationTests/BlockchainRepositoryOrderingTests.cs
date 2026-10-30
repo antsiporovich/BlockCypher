@@ -1,3 +1,6 @@
+using AwesomeAssertions;
+using ICMarkets.Application.Features.History;
+using ICMarkets.Application.Mapping;
 using ICMarkets.Domain;
 using ICMarkets.Domain.Entities;
 using ICMarkets.Infrastructure.Persistence;
@@ -49,7 +52,7 @@ public sealed class BlockchainRepositoryOrderingTests : IDisposable
         await Add(Network.BtcMain, t0.AddMinutes(20));
         await _db.SaveChangesAsync(CancellationToken.None);
 
-        var history = await _repo.GetHistoryAsync(Network.BtcMain, take: 50, skip: 0, CancellationToken.None);
+        var history = await _repo.GetHistoryAsync(Network.BtcMain, take: 50, after: null, CancellationToken.None);
 
         Assert.Equal(
             new[] { t0.AddMinutes(30), t0.AddMinutes(20), t0.AddMinutes(10) },
@@ -64,26 +67,77 @@ public sealed class BlockchainRepositoryOrderingTests : IDisposable
         await Add(Network.EthMain, t0.AddMinutes(2));
         await _db.SaveChangesAsync(CancellationToken.None);
 
-        var history = await _repo.GetHistoryAsync(Network.BtcMain, take: 50, skip: 0, CancellationToken.None);
+        var history = await _repo.GetHistoryAsync(Network.BtcMain, take: 50, after: null, CancellationToken.None);
 
         Assert.Single(history);
         Assert.All(history, s => Assert.Equal(Network.BtcMain, s.Network));
     }
 
     [Fact]
-    public async Task GetHistoryAsync_honours_skip_and_take()
+    public async Task GetHistoryAsync_returns_take_plus_one_as_a_has_next_page_probe()
     {
         var t0 = new DateTimeOffset(2026, 1, 1, 0, 0, 0, TimeSpan.Zero);
         for (var i = 0; i < 5; i++)
             await Add(Network.BtcMain, t0.AddMinutes(i));
         await _db.SaveChangesAsync(CancellationToken.None);
 
-        // newest-first order is [t+4, t+3, t+2, t+1, t+0]; skip 1, take 2 -> [t+3, t+2]
-        var page = await _repo.GetHistoryAsync(Network.BtcMain, take: 2, skip: 1, CancellationToken.None);
+        // take: 2 asks for two rows, but the repository fetches one extra so the caller
+        // can tell a next page exists without a second COUNT query.
+        var page = await _repo.GetHistoryAsync(Network.BtcMain, take: 2, after: null, CancellationToken.None);
 
-        Assert.Equal(
-            new[] { t0.AddMinutes(3), t0.AddMinutes(2) },
-            page.Select(s => s.CreatedAt));
+        page.Should().HaveCount(3);
+        page.Select(s => s.CreatedAt).Should().Equal(t0.AddMinutes(4), t0.AddMinutes(3), t0.AddMinutes(2));
+    }
+
+    // The core keyset guarantee and the whole reason OFFSET was replaced: a row ingested between
+    // two page requests (the background worker does this on every tick) must never cause a row to
+    // repeat or be skipped across pages. With OFFSET `.Skip(2)` page 2 here would be [t+2, t+1] -
+    // t+2 duplicated. Fails if the repository reverts to OFFSET paging.
+    [Fact]
+    public async Task History_keyset_does_not_duplicate_rows_when_a_row_is_inserted_between_pages()
+    {
+        var handler = new GetChainHistoryQueryHandler(_repo, new SnapshotMapper());
+        var t0 = new DateTimeOffset(2026, 1, 1, 0, 0, 0, TimeSpan.Zero);
+
+        // newest-first is [t+3, t+2, t+1]
+        await Add(Network.BtcMain, t0.AddMinutes(1));
+        await Add(Network.BtcMain, t0.AddMinutes(2));
+        await Add(Network.BtcMain, t0.AddMinutes(3));
+        await _db.SaveChangesAsync(CancellationToken.None);
+
+        var page1 = await handler.Handle(new GetChainHistoryQuery("btc-main", Take: 2), CancellationToken.None);
+        page1.Items.Select(i => i.CreatedAt).Should().Equal(t0.AddMinutes(3), t0.AddMinutes(2));
+        page1.NextCursor.Should().NotBeNull();
+
+        // a newer snapshot arrives between the two page requests
+        await Add(Network.BtcMain, t0.AddMinutes(4));
+        await _db.SaveChangesAsync(CancellationToken.None);
+
+        var page2 = await handler.Handle(
+            new GetChainHistoryQuery("btc-main", Take: 2, Cursor: page1.NextCursor), CancellationToken.None);
+
+        // only the row strictly older than the cursor remains; the inserted t+4 does not leak in
+        page2.Items.Select(i => i.CreatedAt).Should().Equal(t0.AddMinutes(1));
+        page2.NextCursor.Should().BeNull();
+
+        // no row appears on both pages
+        page1.Items.Select(i => i.Id).Intersect(page2.Items.Select(i => i.Id)).Should().BeEmpty();
+    }
+
+    [Fact]
+    public async Task History_invalid_cursor_is_treated_as_the_first_page_by_the_handler_but_rejected_by_the_validator()
+    {
+        // The handler keeps the cursor opaque: an unparseable token is ignored rather than trusted
+        // (the validator is what turns it into a 400 at the API boundary - see the validator tests).
+        var handler = new GetChainHistoryQueryHandler(_repo, new SnapshotMapper());
+        var t0 = new DateTimeOffset(2026, 1, 1, 0, 0, 0, TimeSpan.Zero);
+        await Add(Network.BtcMain, t0.AddMinutes(1));
+        await _db.SaveChangesAsync(CancellationToken.None);
+
+        var page = await handler.Handle(
+            new GetChainHistoryQuery("btc-main", Take: 2, Cursor: "not-a-valid-cursor"), CancellationToken.None);
+
+        page.Items.Should().ContainSingle();
     }
 
     [Fact]

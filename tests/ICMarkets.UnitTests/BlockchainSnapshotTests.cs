@@ -53,4 +53,18 @@ public sealed class BlockchainSnapshotTests
         ((Action)(() => Create(peerCount: -1))).Should().Throw<ArgumentOutOfRangeException>();
         ((Action)(() => Create(unconfirmedCount: -1))).Should().Throw<ArgumentOutOfRangeException>();
     }
+
+    [Fact]
+    public void Create_NegativeForkHeight_Throws() =>
+        ((Action)(() => BlockchainSnapshot.Create(
+            Network.BtcMain, "BTC.main", 1, "h", T, null, null, null, 0, 0,
+            null, null, lastForkHeight: -1, null, "{}", T)))
+            .Should().Throw<ArgumentOutOfRangeException>();
+
+    [Fact]
+    public void Create_NonNegativeForkHeight_IsAllowed() =>
+        BlockchainSnapshot.Create(
+            Network.BtcMain, "BTC.main", 1, "h", T, null, null, null, 0, 0,
+            null, null, lastForkHeight: 100, null, "{}", T)
+            .LastForkHeight.Should().Be(100);
 }

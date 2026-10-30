@@ -59,6 +59,10 @@ public class BlockchainSnapshot
         ArgumentOutOfRangeException.ThrowIfNegative(height);
         ArgumentOutOfRangeException.ThrowIfNegative(peerCount);
         ArgumentOutOfRangeException.ThrowIfNegative(unconfirmedCount);
+        // a fork height is a block height - it cannot be negative (the fee/gas tiers guard
+        // themselves inside their value objects; this primitive lives directly on the entity).
+        if (lastForkHeight is { } forkHeight)
+            ArgumentOutOfRangeException.ThrowIfNegative(forkHeight);
 
         var snapshot = new BlockchainSnapshot
         {

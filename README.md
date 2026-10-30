@@ -102,7 +102,7 @@ Infrastructure or Api.
 | Method | Route | Purpose |
 |---|---|---|
 | `POST` | `/api/v1/blockchains/ingest` | Fetch all 5 configured networks now and store a snapshot of each (per-network failure isolation — one chain failing never aborts the batch; check `failed` in the response). |
-| `GET` | `/api/v1/blockchains/{network}/history?take=50&skip=0` | Stored snapshots for one network, `CreatedAt` descending. |
+| `GET` | `/api/v1/blockchains/{network}/history?take=50&cursor=...` | Stored snapshots for one network, `CreatedAt` descending. Keyset (cursor) paginated: the response is `{ "items": [...], "nextCursor": "..."\|null }`; pass `nextCursor` back as `cursor` for the next page. A malformed `cursor` is a `400`. |
 | `GET` | `/api/v1/blockchains/{network}/latest` | Most recently stored snapshot for one network. `404` if nothing has been ingested yet. |
 | `GET` | `/api/v1/blockchains/networks` | The network keys this API accepts (`btc-main`, `eth-main`, `dash-main`, `btc-test3`, `ltc-main`). |
 | `GET` | `/health` | Full health, including a DB connectivity check. |
@@ -125,8 +125,11 @@ ingested response:
 - `RawJson` — the complete BlockCypher response, stored as provided, so nothing captured by the typed
   columns is ever lost.
 - `RawJson` is only stored for a **valid** response: an HTTP 200 whose body is empty (`{}`), an error
-  object, or another network's data (wrong name, wrong fee/gas family, missing `time`) is rejected in
-  `BlockCypherClient` and reported in `failed`, never persisted as a snapshot of default values.
+  object, another network's data (wrong name, wrong fee/gas family, missing `time`), or physically
+  impossible values (negative fees, gas prices or fork height) is rejected in `BlockCypherClient` and
+  reported in `failed`, never persisted as a snapshot of default values. The non-negativity invariant is
+  also enforced in the domain — `FeeRates`/`GasPrices` and `BlockchainSnapshot.Create` reject negative
+  values — so a bad snapshot is unrepresentable from any path, not just the ingestion adapter.
 - `CreatedAt` (`DateTimeOffset`, UTC) — the **request** time: stamped by the ingestion producer from an
   injected `TimeProvider` just *before* it calls BlockCypher and carried through the channel
   as `RequestedAt`. It is deliberately **not** the response-receipt time (that varies with latency,
@@ -135,6 +138,16 @@ ingested response:
   when it was written. Not `DateTime.UtcNow`, so it stays deterministic and testable. History is always
   returned ordered `CreatedAt DESC`, with `Id DESC` as a tiebreaker for same-timestamp rows, backed by
   a composite `(Network, CreatedAt DESC)` index.
+
+### History pagination (keyset, not offset)
+
+`/history` uses **keyset (cursor) pagination** over `(CreatedAt DESC, Id DESC)`, not OFFSET. Each page
+returns an opaque `nextCursor` (the `(CreatedAt, Id)` of its last row, base64url-encoded); pass it back
+as `cursor` to get the next page. Because the next page selects rows strictly *after* that cursor, a
+snapshot ingested between two page requests — the background worker does this on every tick — can
+neither shift a page nor be duplicated across pages, which OFFSET (`skip`) cannot guarantee. The cursor
+is opaque and only ever trusted as far as it parses: a malformed or forged token is a `400`, never a
+silent first page. The same `(Network, CreatedAt DESC)` index serves the keyset predicate and order.
 
 ## Testing
 
