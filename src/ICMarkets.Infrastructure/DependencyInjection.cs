@@ -34,7 +34,12 @@ public static class DependencyInjection
         // lifetime behind it is built here.
         services.AddSingleton<IUnitOfWorkFactory, IngestionUnitOfWorkFactory>();
 
-        services.Configure<BlockCypherOptions>(config.GetSection(BlockCypherOptions.SectionName));
+        // Options are validated at startup (ValidateOnStart): invalid config fails fast with a
+        // clear message instead of surfacing at first use. See OptionsValidators.cs.
+        services.AddSingleton<IValidateOptions<BlockCypherOptions>, BlockCypherOptionsValidator>();
+        services.AddOptions<BlockCypherOptions>()
+            .Bind(config.GetSection(BlockCypherOptions.SectionName))
+            .ValidateOnStart();
         services.AddSingleton<BlockCypherRateLimiter>();
         var blockCypherClient = services.AddHttpClient<IChainInfoSource, BlockCypherClient>((sp, c) =>
             {
@@ -71,7 +76,10 @@ public static class DependencyInjection
         blockCypherClient.AddHttpMessageHandler(sp =>
             new RateLimitingHandler(sp.GetRequiredService<BlockCypherRateLimiter>()));
 
-        services.Configure<IngestionOptions>(config.GetSection(IngestionOptions.SectionName));
+        services.AddSingleton<IValidateOptions<IngestionOptions>, IngestionOptionsValidator>();
+        services.AddOptions<IngestionOptions>()
+            .Bind(config.GetSection(IngestionOptions.SectionName))
+            .ValidateOnStart();
         services.AddHostedService<ChainIngestionWorker>();
 
         // Event-driven outbound edge: SnapshotIngested events are written to
@@ -79,7 +87,10 @@ public static class DependencyInjection
         // drained to RabbitMQ by OutboxPublisherWorker, which no-ops when
         // Outbox:Enabled is false - no RabbitMQ required for local/SQLite
         // dev or the functional tests.
-        services.Configure<OutboxOptions>(config.GetSection(OutboxOptions.SectionName));
+        services.AddSingleton<IValidateOptions<OutboxOptions>, OutboxOptionsValidator>();
+        services.AddOptions<OutboxOptions>()
+            .Bind(config.GetSection(OutboxOptions.SectionName))
+            .ValidateOnStart();
         services.AddSingleton<IEventPublisher, RabbitMqEventPublisher>();
         services.AddHostedService<OutboxPublisherWorker>();
 

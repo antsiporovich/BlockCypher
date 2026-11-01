@@ -64,4 +64,112 @@ public sealed class OpenApiContractTests : IClassFixture<ApiFactory>
             .ToList();
         parameterNames.Should().Contain("cursor").And.NotContain("skip");
     }
+
+    // Nullable is not optional: native OpenAPI lists every positional-record property under
+    // `required`, so the real JSON must carry each one (as null when it has no value). The
+    // serializer used to omit nulls (WhenWritingNull) and so violated its own published schema.
+    [Fact]
+    public async Task EmptyPage_SatisfiesTheRequiredListOfTheSchema()
+    {
+        using var fresh = new ApiFactory();
+        using var client = fresh.CreateClient();
+
+        var json = await GetJsonAsync(client, "/api/v1/blockchains/btc-main/history");
+
+        json.GetProperty("items").GetArrayLength().Should().Be(0);
+        json.GetProperty("nextCursor").ValueKind.Should().Be(JsonValueKind.Null);
+        await AssertConformsAsync(client, "HistoryPage", json);
+    }
+
+    [Fact]
+    public async Task LastPage_BtcSnapshot_AndEthSnapshot_SatisfyTheRequiredListOfTheSchema()
+    {
+        // own factory: the class fixture is shared and another test leaves eth-main stubbed as failing
+        using var fresh = new ApiFactory();
+        using var client = fresh.CreateClient();
+
+        (await client.PostAsync("/api/v1/blockchains/ingest", content: null)).EnsureSuccessStatusCode();
+
+        // last page: nextCursor is null but present
+        var btc = await GetJsonAsync(client, "/api/v1/blockchains/btc-main/history?take=200");
+        btc.GetProperty("nextCursor").ValueKind.Should().Be(JsonValueKind.Null);
+        var btcItem = btc.GetProperty("items")[0];
+        btcItem.GetProperty("gasPrices").ValueKind.Should().Be(JsonValueKind.Null, "BTC has no gas family");
+        await AssertConformsAsync(client, "HistoryPage", btc);
+
+        var eth = await GetJsonAsync(client, "/api/v1/blockchains/eth-main/history?take=200");
+        var ethItem = eth.GetProperty("items")[0];
+        ethItem.GetProperty("feeRates").ValueKind.Should().Be(JsonValueKind.Null, "ETH has no fee family");
+        await AssertConformsAsync(client, "HistoryPage", eth);
+
+        await AssertConformsAsync(client, "BlockchainSnapshotDto",
+            await GetJsonAsync(client, "/api/v1/blockchains/btc-main/latest"));
+    }
+
+    private static async Task<JsonElement> GetJsonAsync(HttpClient client, string url)
+    {
+        var response = await client.GetAsync(url);
+        response.EnsureSuccessStatusCode();
+        return JsonDocument.Parse(await response.Content.ReadAsStringAsync()).RootElement.Clone();
+    }
+
+    private static async Task AssertConformsAsync(HttpClient client, string schemaName, JsonElement value)
+    {
+        var doc = await client.GetFromJsonAsync<JsonElement>("/openapi/v1.json");
+        var schemas = doc.GetProperty("components").GetProperty("schemas");
+        var missing = new List<string>();
+        CollectMissingRequired(schemas, schemas.GetProperty(schemaName), value, schemaName, missing);
+        missing.Should().BeEmpty("every property the schema marks required must be present in the real response");
+    }
+
+    // Walks the value against the schema: object -> required + each described property;
+    // array -> items; $ref -> the referenced component; oneOf/anyOf (the nullable wrapper) -> the
+    // first branch that is not the null type. A null value ends the walk.
+    private static void CollectMissingRequired(
+        JsonElement schemas, JsonElement schema, JsonElement value, string path, List<string> missing)
+    {
+        if (value.ValueKind == JsonValueKind.Null)
+            return;
+
+        if (schema.TryGetProperty("$ref", out var reference))
+        {
+            var name = reference.GetString()!.Split('/')[^1];
+            CollectMissingRequired(schemas, schemas.GetProperty(name), value, path, missing);
+            return;
+        }
+
+        foreach (var key in new[] { "oneOf", "anyOf" })
+        {
+            if (!schema.TryGetProperty(key, out var branches)) continue;
+            foreach (var branch in branches.EnumerateArray())
+            {
+                if (branch.TryGetProperty("type", out var t) && t.ValueKind == JsonValueKind.String && t.GetString() == "null")
+                    continue;
+                CollectMissingRequired(schemas, branch, value, path, missing);
+                return;
+            }
+            return;
+        }
+
+        if (value.ValueKind == JsonValueKind.Array && schema.TryGetProperty("items", out var items))
+        {
+            var i = 0;
+            foreach (var element in value.EnumerateArray())
+                CollectMissingRequired(schemas, items, element, $"{path}[{i++}]", missing);
+            return;
+        }
+
+        if (value.ValueKind != JsonValueKind.Object)
+            return;
+
+        if (schema.TryGetProperty("required", out var required))
+            foreach (var name in required.EnumerateArray().Select(r => r.GetString()!))
+                if (!value.TryGetProperty(name, out _))
+                    missing.Add($"{path}.{name}");
+
+        if (schema.TryGetProperty("properties", out var properties))
+            foreach (var property in properties.EnumerateObject())
+                if (value.TryGetProperty(property.Name, out var child))
+                    CollectMissingRequired(schemas, property.Value, child, $"{path}.{property.Name}", missing);
+    }
 }

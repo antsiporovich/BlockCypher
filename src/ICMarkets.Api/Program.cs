@@ -35,7 +35,9 @@ builder.Services.AddControllers()
     {
         // PropertyNamingPolicy is already camelCase by default for ASP.NET Core's
         // System.Text.Json integration - listed here to make the choice explicit.
-        o.JsonSerializerOptions.DefaultIgnoreCondition = JsonIgnoreCondition.WhenWritingNull;
+        // Nulls are serialized (NOT WhenWritingNull): native OpenAPI marks positional-record
+        // properties 'required' (nullable != optional), so omitting a null property - nextCursor on the
+        // last page, gasPrices on a BTC snapshot - would contradict the published schema.
         o.JsonSerializerOptions.Converters.Add(new JsonStringEnumConverter());
     });
 builder.Services.AddOpenApi();

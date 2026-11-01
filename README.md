@@ -56,30 +56,30 @@ Clean Architecture layering with the dependency rule enforced one direction only
 Architecture, Vertical Slice and CQRS, and this hybrid demonstrates all three.
 
 ```
-┌─────────────────────────────────────────────────────────┐
-│  ICMarkets.Api                                           │
-│  controllers · OpenAPI/Swagger/Scalar · CORS · health    │
-│  · DI composition root · OpenTelemetry/Serilog wiring    │
+┌───────────────────────────────────────────────────────────┐
+│  ICMarkets.Api                                            │
+│  controllers · OpenAPI/Swagger/Scalar · CORS · health     │
+│  · DI composition root · OpenTelemetry/Serilog wiring     │
 └───────────────────────────┬───────────────────────────────┘
-                             ▼
-┌─────────────────────────────────────────────────────────┐
+                            ▼
+┌───────────────────────────────────────────────────────────┐
 │  ICMarkets.Infrastructure                                 │
 │  EF Core DbContext · repositories · BlockCypher HTTP      │
 │  client (resilience) · ingestion background worker        │
 └───────────────────────────┬───────────────────────────────┘
-                             ▼
-┌─────────────────────────────────────────────────────────┐
-│  ICMarkets.Application                                    │
+                            ▼
+┌────────────────────────────────────────────────────────────┐
+│  ICMarkets.Application                                     │
 │  CQRS commands/queries (feature folders: Ingestion,        │
 │  History, Networks) · DTOs · Mapperly mappers · validators │
-└───────────────────────────┬───────────────────────────────┘
-                             ▼
-┌─────────────────────────────────────────────────────────┐
+└───────────────────────────┬────────────────────────────────┘
+                            ▼
+┌────────────────────────────────────────────────────────────┐
 │  ICMarkets.Domain                                          │
-│  BlockchainSnapshot entity · Network enum · FeeRates /      │
-│  GasPrices value objects · SnapshotIngested domain event    │
-│  (no dependencies on any other layer)                       │
-└─────────────────────────────────────────────────────────┘
+│  BlockchainSnapshot entity · Network enum · FeeRates /     │
+│  GasPrices value objects · SnapshotIngested domain event   │
+│  (no dependencies on any other layer)                      │
+└────────────────────────────────────────────────────────────┘
 ```
 
 `Api → Infrastructure → Application → Domain`. Domain depends on nothing; Application never references
@@ -224,6 +224,10 @@ variables (`Database__Provider`, etc. — the compose file shows this).
   bucket only bounds the average and can release two requests milliseconds apart). It sits in the HTTP pipeline, placed
   inside the retry strategy so every real attempt, retries included, takes a permit; all `POST /ingest`
   calls and the background worker share it, and callers over the budget queue instead of failing.
+  The response body is buffered inside that same pipeline (a small handler between the retry strategy and
+  the limiter), so a connection that drops mid-body after `200 OK` is a normal retryable failure of the one
+  existing policy - the network recovers on the next attempt instead of failing - while a body that merely
+  stalls still hits the fetch budget and fails only that network.
   Limits worth stating plainly: it is per process (several replicas would need a distributed limiter,
   e.g. Redis), and a per-second limit does not enforce BlockCypher's separate hourly quota - that is
   what the optional token and the 300s worker interval are for. Each persisted item gets its own unit of work
