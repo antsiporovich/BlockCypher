@@ -17,8 +17,7 @@ public sealed class UpstreamFailureTests : IClassFixture<ApiFactory>
     // matching) - start from that same baseline, don't just add a bare
     // JsonSerializerOptions(), or "succeeded"/"failed" stop matching
     // Succeeded/Failed. Then layer on JsonStringEnumConverter, which the API
-    // adds in Program.cs but ReadFromJsonAsync's defaults don't include, so
-    // IngestFailure.Network can deserialize back from "EthMain" etc.
+    // adds in Program.cs but ReadFromJsonAsync's defaults don't include.
     private static readonly JsonSerializerOptions JsonOptions = new(JsonSerializerDefaults.Web)
     {
         Converters = { new JsonStringEnumConverter() },
@@ -46,6 +45,6 @@ public sealed class UpstreamFailureTests : IClassFixture<ApiFactory>
 
         var result = await response.Content.ReadFromJsonAsync<IngestAllChainsResult>(JsonOptions);
         result!.Succeeded.Should().HaveCount(4);
-        result.Failed.Should().ContainSingle(f => f.Network == ICMarkets.Domain.Network.EthMain);
+        result.Failed.Should().ContainSingle(f => f.Network == "eth-main");
     }
 }

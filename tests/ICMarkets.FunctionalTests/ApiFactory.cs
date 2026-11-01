@@ -19,7 +19,7 @@ namespace ICMarkets.FunctionalTests;
 // SQLite-file/SQL-Server config the app would otherwise pick. Everything
 // else (controllers, validation, MediatR pipeline, CORS, health checks)
 // runs unmodified - this is a real end-to-end test of the composed app.
-public sealed class ApiFactory : WebApplicationFactory<Program>
+public class ApiFactory : WebApplicationFactory<Program>
 {
     private SqliteConnection? _connection;
 
@@ -52,6 +52,9 @@ public sealed class ApiFactory : WebApplicationFactory<Program>
             // run on startup (see ChainIngestionWorker) and race with the
             // test that's asserting on a specific ingest call.
             ["Ingestion:Enabled"] = "false",
+            // the shared rate limiter would add ~1s to every ingest call in the suite;
+            // effectively disable it here. RateLimitTests turns the real 3/s back on.
+            ["BlockCypher:RequestsPerSecond"] = "1000",
         }));
 
         builder.ConfigureServices(services =>
@@ -60,8 +63,17 @@ public sealed class ApiFactory : WebApplicationFactory<Program>
             _connection.Open();
 
             services.RemoveAll<DbContextOptions<AppDbContext>>();
-            services.AddDbContext<AppDbContext>(opt => opt.UseSqlite(_connection));
+            services.AddDbContext<AppDbContext>(opt =>
+            {
+                opt.UseSqlite(_connection);
+                ConfigureDbContextOptions(opt);
+            });
         });
+    }
+
+    /// <summary>Extension point for test factories that need to customise the DbContext (e.g. add an interceptor).</summary>
+    protected virtual void ConfigureDbContextOptions(DbContextOptionsBuilder options)
+    {
     }
 
     protected override void Dispose(bool disposing)

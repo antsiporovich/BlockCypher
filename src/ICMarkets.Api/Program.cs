@@ -5,6 +5,7 @@ using ICMarkets.Application;
 using ICMarkets.Application.Telemetry;
 using ICMarkets.Infrastructure;
 using ICMarkets.Infrastructure.Persistence;
+using Microsoft.AspNetCore.Diagnostics.HealthChecks;
 using Microsoft.AspNetCore.HttpOverrides;
 using Microsoft.EntityFrameworkCore;
 using OpenTelemetry.Metrics;
@@ -34,7 +35,9 @@ builder.Services.AddControllers()
     {
         // PropertyNamingPolicy is already camelCase by default for ASP.NET Core's
         // System.Text.Json integration - listed here to make the choice explicit.
-        o.JsonSerializerOptions.DefaultIgnoreCondition = JsonIgnoreCondition.WhenWritingNull;
+        // Nulls are serialized (NOT WhenWritingNull): native OpenAPI marks positional-record
+        // properties 'required' (nullable != optional), so omitting a null property - nextCursor on the
+        // last page, gasPrices on a BTC snapshot - would contradict the published schema.
         o.JsonSerializerOptions.Converters.Add(new JsonStringEnumConverter());
     });
 builder.Services.AddOpenApi();
@@ -91,16 +94,12 @@ var app = builder.Build();
 // (localhost:8081) instead of the internal Docker DNS name YARP otherwise
 // proxies with (api:8080) - without this, the native OpenAPI document's
 // auto-detected server URL bakes in "api:8080", which Swagger UI's "Execute"
-// can't reach from a host browser. KnownIPNetworks/KnownProxies are cleared
-// because the gateway's container IP isn't known ahead of time in compose;
-// fine for this stack, a real deployment would restrict it.
-var forwardedHeaders = new ForwardedHeadersOptions
-{
-    ForwardedHeaders = ForwardedHeaders.XForwardedFor | ForwardedHeaders.XForwardedProto | ForwardedHeaders.XForwardedHost,
-};
-forwardedHeaders.KnownIPNetworks.Clear();
-forwardedHeaders.KnownProxies.Clear();
-app.UseForwardedHeaders(forwardedHeaders);
+// can't reach from a host browser. Opt-in via the ForwardedHeaders config section
+// and honored ONLY from the configured networks/proxies (docker-compose lists the
+// compose network); an unconfigured API trusts no X-Forwarded-* at all.
+var forwardedHeaders = ForwardedHeadersSetup.Build(app.Configuration);
+if (forwardedHeaders is not null)
+    app.UseForwardedHeaders(forwardedHeaders);
 
 app.UseSerilogRequestLogging();
 
@@ -116,7 +115,12 @@ app.UseSwaggerUI(o => o.SwaggerEndpoint("/openapi/v1.json", "v1"));
 // startup for nothing.
 app.UseCors("Default");
 app.MapControllers();
-app.MapHealthChecks("/health");
+app.MapHealthChecks("/health"); // everything, incl. DB (docker-compose healthcheck, humans)
+// k8s split: liveness must NOT touch the DB, or a DB outage makes the kubelet
+// restart a perfectly healthy API; readiness DOES, so traffic stops while the
+// DB is unreachable but the pod stays up.
+app.MapHealthChecks("/health/live", new HealthCheckOptions { Predicate = _ => false });
+app.MapHealthChecks("/health/ready");
 app.MapPrometheusScrapingEndpoint(); // GET /metrics
 
 // migrations on SQL Server, EnsureCreated on the SQLite no-Docker path

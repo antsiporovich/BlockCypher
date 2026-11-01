@@ -2,6 +2,7 @@ using System.Net;
 using System.Net.Http.Json;
 using AwesomeAssertions;
 using ICMarkets.Application.Dtos;
+using ICMarkets.Application.Features.History;
 using ICMarkets.Application.Features.Ingestion;
 using Microsoft.AspNetCore.Mvc;
 
@@ -26,12 +27,12 @@ public sealed class IngestionAndHistoryTests : IClassFixture<ApiFactory>
         var historyResponse = await _client.GetAsync("/api/v1/blockchains/btc-main/history");
         historyResponse.StatusCode.Should().Be(HttpStatusCode.OK);
 
-        var history = await historyResponse.Content.ReadFromJsonAsync<List<BlockchainSnapshotDto>>();
-        history!.Should().Contain(s => s.Height == 973576 && s.Hash.StartsWith("0000000000000000"));
+        var history = await historyResponse.Content.ReadFromJsonAsync<HistoryPage>();
+        history!.Items.Should().Contain(s => s.Height == 973576 && s.Hash.StartsWith("0000000000000000"));
     }
 
     [Fact]
-    public async Task History_NewestFirst_AndHonoursTake()
+    public async Task History_NewestFirst_AndPaginatesWithACursor()
     {
         // two ingests of the same (static) stub body still produce two rows
         // with distinct, increasing CreatedAt - enough to assert ordering
@@ -40,14 +41,33 @@ public sealed class IngestionAndHistoryTests : IClassFixture<ApiFactory>
         (await _client.PostAsync("/api/v1/blockchains/ingest", content: null)).EnsureSuccessStatusCode();
 
         var full = await (await _client.GetAsync("/api/v1/blockchains/eth-main/history?take=200"))
-            .Content.ReadFromJsonAsync<List<BlockchainSnapshotDto>>();
-        full!.Count.Should().BeGreaterThanOrEqualTo(2);
-        full.Should().BeInDescendingOrder(s => s.CreatedAt);
+            .Content.ReadFromJsonAsync<HistoryPage>();
+        full!.Items.Count.Should().BeGreaterThanOrEqualTo(2);
+        full.Items.Should().BeInDescendingOrder(s => s.CreatedAt);
 
-        var topOne = await (await _client.GetAsync("/api/v1/blockchains/eth-main/history?take=1"))
-            .Content.ReadFromJsonAsync<List<BlockchainSnapshotDto>>();
-        topOne.Should().ContainSingle();
-        topOne![0].CreatedAt.Should().Be(full[0].CreatedAt);
+        // first page of one: newest row, plus a cursor to continue
+        var page1 = await (await _client.GetAsync("/api/v1/blockchains/eth-main/history?take=1"))
+            .Content.ReadFromJsonAsync<HistoryPage>();
+        page1!.Items.Should().ContainSingle();
+        page1.Items[0].CreatedAt.Should().Be(full.Items[0].CreatedAt);
+        page1.NextCursor.Should().NotBeNull();
+
+        // second page via the cursor: the next row, with no overlap
+        var page2 = await (await _client.GetAsync($"/api/v1/blockchains/eth-main/history?take=1&cursor={page1.NextCursor}"))
+            .Content.ReadFromJsonAsync<HistoryPage>();
+        page2!.Items.Should().ContainSingle();
+        page2.Items[0].CreatedAt.Should().Be(full.Items[1].CreatedAt);
+        page2.Items[0].Id.Should().NotBe(page1.Items[0].Id);
+    }
+
+    [Fact]
+    public async Task History_MalformedCursor_Returns400ProblemDetails()
+    {
+        var response = await _client.GetAsync("/api/v1/blockchains/btc-main/history?cursor=not-a-valid-cursor");
+
+        response.StatusCode.Should().Be(HttpStatusCode.BadRequest);
+        var problem = await response.Content.ReadFromJsonAsync<ValidationProblemDetails>();
+        problem!.Errors.Should().ContainKey("Cursor");
     }
 
     [Fact]

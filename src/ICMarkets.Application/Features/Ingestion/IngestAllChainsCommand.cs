@@ -4,9 +4,10 @@ using System.Threading.Channels;
 using ICMarkets.Application.Abstractions;
 using ICMarkets.Application.Dtos;
 using ICMarkets.Application.Telemetry;
+using ICMarkets.Application.Mapping;
 using ICMarkets.Domain;
+using ICMarkets.Domain.Entities;
 using MediatR;
-using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging;
 
 namespace ICMarkets.Application.Features.Ingestion;
@@ -14,9 +15,12 @@ namespace ICMarkets.Application.Features.Ingestion;
 public sealed record IngestAllChainsCommand : IRequest<IngestAllChainsResult>;
 
 /// <summary>One network's ingestion failure, with the exception message.</summary>
-/// <param name="Network">The network key that failed.</param>
+/// <param name="Network">The network key that failed (e.g. <c>eth-main</c>) - the same key format as <c>BlockchainSnapshotDto.Network</c>.</param>
 /// <param name="Error">The exception message from the failed fetch or persist.</param>
-public sealed record IngestFailure(Network Network, string Error);
+// The key is a string on purpose: an enum here would put an integer-or-string ambiguity into the
+// wire contract (native OpenAPI documents enums as integers, the MVC converter writes names) and
+// would make success and failure use different spellings of the same network.
+public sealed record IngestFailure(string Network, string Error);
 
 /// <summary>Result of ingesting all configured networks in one batch.</summary>
 /// <param name="Succeeded">Snapshots that were fetched and persisted successfully.</param>
@@ -30,7 +34,10 @@ public sealed record IngestAllChainsResult(
 // persists them one at a time. See README.md "Concurrency" for why this is
 // Task-based (Channels + Parallel.ForEachAsync) and not PLINQ.
 public sealed class IngestAllChainsCommandHandler(
-    IServiceScopeFactory scopeFactory,
+    IChainInfoSource chainInfoSource,
+    IUnitOfWorkFactory unitOfWorkFactory,
+    SnapshotMapper mapper,
+    TimeProvider clock,
     ILogger<IngestAllChainsCommandHandler> logger)
     : IRequestHandler<IngestAllChainsCommand, IngestAllChainsResult>
 {
@@ -81,12 +88,8 @@ public sealed class IngestAllChainsCommandHandler(
                 new ParallelOptions { MaxDegreeOfParallelism = MaxFetchConcurrency, CancellationToken = ct },
                 async (network, token) =>
                 {
-                    // fresh DI scope per branch: IBlockCypherClient itself is
-                    // safe to share, but this keeps the same scoping discipline
-                    // as the consumer side and avoids any future dependency on
-                    // this client becoming scoped/stateful surprising someone.
-                    using var scope = scopeFactory.CreateScope();
-                    var client = scope.ServiceProvider.GetRequiredService<IBlockCypherClient>();
+                    // the source is injected directly: an HttpClient-based adapter is
+                    // thread-safe, so the parallel branches simply share it.
                     var networkKey = NetworkKey.ToKey(network);
 
                     using var fetchActivity = IngestionTelemetry.ActivitySource.StartActivity("fetch-chain-info");
@@ -95,13 +98,22 @@ public sealed class IngestAllChainsCommandHandler(
                     var stopwatch = Stopwatch.StartNew();
                     try
                     {
-                        var result = await client.GetChainInfoAsync(network, token);
-                        await writer.WriteAsync(new FetchedChain(network, result), token);
+                        // stamped BEFORE the call: CreatedAt is the moment the API was asked,
+                        // not when the answer was received/parsed (which varies with latency,
+                        // rate-limit queueing and retries) and certainly not when the row is
+                        // persisted (later still if the item waits in the bounded channel).
+                        var requestedAt = clock.GetUtcNow();
+                        var result = await chainInfoSource.GetChainInfoAsync(network, token);
+                        await writer.WriteAsync(new FetchedChain(network, result, requestedAt), token);
                     }
-                    catch (Exception ex) when (ex is not OperationCanceledException)
+                    // Discriminate by TOKEN, not by exception type: a timeout also surfaces
+                    // as an OperationCanceledException while `token` is NOT cancelled, and
+                    // that is one network failing - not a shutdown. Only a cancelled token
+                    // is allowed to propagate and abort the batch.
+                    catch (Exception ex) when (ex is not OperationCanceledException || !token.IsCancellationRequested)
                     {
                         logger.LogWarning(ex, "Fetch failed for {Network}", network);
-                        failures.Add(new IngestFailure(network, ex.Message));
+                        failures.Add(new IngestFailure(NetworkKey.ToKey(network), ex.Message));
                         IngestionTelemetry.IngestionFailures.Add(1, IngestionTelemetry.NetworkTag(networkKey));
                     }
                     finally
@@ -122,25 +134,28 @@ public sealed class IngestAllChainsCommandHandler(
     private async Task<List<BlockchainSnapshotDto>> ConsumeAsync(
         ChannelReader<FetchedChain> reader, ConcurrentBag<IngestFailure> failures, CancellationToken ct)
     {
-        // Single consumer: every persist goes through one DI scope (one
-        // AppDbContext) sequentially, so there's no concurrent SaveChanges
-        // and no extra locking needed - DbContext just never sees two
-        // operations in flight at once.
+        // Single consumer: persists run one at a time, so there's no
+        // concurrent SaveChanges and no extra locking needed. But each item
+        // gets its OWN unit of work (and so its own AppDbContext): a failed
+        // SaveChanges leaves the rejected entity in the ChangeTracker as
+        // Added, and a shared context would retry inserting it together with
+        // the next valid entity - one bad response would then fail every
+        // later network too. A poisoned unit of work is simply discarded.
+        // The factory port hides how it is built (a DI scope in Infrastructure).
+        // For 5 networks the per-item cost is negligible.
         var succeeded = new List<BlockchainSnapshotDto>();
-        using var scope = scopeFactory.CreateScope();
-        var sender = scope.ServiceProvider.GetRequiredService<ISender>();
 
         await foreach (var item in reader.ReadAllAsync(ct))
         {
             try
             {
-                var dto = await sender.Send(new PersistSnapshotCommand(item.Network, item.Result), ct);
-                succeeded.Add(dto);
+                succeeded.Add(await PersistAsync(item, ct));
             }
-            catch (Exception ex) when (ex is not OperationCanceledException)
+            // same rule as the fetch side: only a cancelled token aborts the batch.
+            catch (Exception ex) when (ex is not OperationCanceledException || !ct.IsCancellationRequested)
             {
                 logger.LogWarning(ex, "Persist failed for {Network}", item.Network);
-                failures.Add(new IngestFailure(item.Network, ex.Message));
+                failures.Add(new IngestFailure(NetworkKey.ToKey(item.Network), ex.Message));
                 IngestionTelemetry.IngestionFailures.Add(1, IngestionTelemetry.NetworkTag(NetworkKey.ToKey(item.Network)));
             }
         }
@@ -148,5 +163,43 @@ public sealed class IngestAllChainsCommandHandler(
         return succeeded;
     }
 
-    private sealed record FetchedChain(Network Network, ChainInfoResult Result);
+    // CreatedAt is the REQUEST time stamped by the producer just before it asked BlockCypher,
+    // deliberately not read from the clock here: under backpressure an item can wait in the
+    // channel before it is persisted, and the history must reflect when the data was
+    // requested, not when the row was written.
+    private async Task<BlockchainSnapshotDto> PersistAsync(FetchedChain item, CancellationToken ct)
+    {
+        using var activity = IngestionTelemetry.ActivitySource.StartActivity("persist-snapshot");
+        var networkKey = NetworkKey.ToKey(item.Network);
+        activity?.SetTag("icmarkets.network", networkKey);
+
+        var info = item.Result.Info;
+        var snapshot = BlockchainSnapshot.Create(
+            network: item.Network,
+            name: info.Name,
+            height: info.Height,
+            hash: info.Hash,
+            time: info.Time,
+            latestUrl: info.LatestUrl,
+            previousHash: info.PreviousHash,
+            previousUrl: info.PreviousUrl,
+            peerCount: info.PeerCount,
+            unconfirmedCount: info.UnconfirmedCount,
+            feeRates: info.FeeRates,
+            gasPrices: info.GasPrices,
+            lastForkHeight: info.LastForkHeight,
+            lastForkHash: info.LastForkHash,
+            rawJson: item.Result.RawJson,
+            createdAt: item.RequestedAt);
+
+        await using var unitOfWork = unitOfWorkFactory.Create();
+        await unitOfWork.Snapshots.AddAsync(snapshot, ct);
+        await unitOfWork.SaveChangesAsync(ct);
+
+        IngestionTelemetry.SnapshotsIngested.Add(1, IngestionTelemetry.NetworkTag(networkKey));
+
+        return mapper.ToDto(snapshot);
+    }
+
+    private sealed record FetchedChain(Network Network, ChainInfoResult Result, DateTimeOffset RequestedAt);
 }

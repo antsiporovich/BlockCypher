@@ -1,6 +1,11 @@
 <Project>
   <PropertyGroup>
     <ManagePackageVersionsCentrally>true</ManagePackageVersionsCentrally>
+    <!-- Without this, a PackageVersion entry only applies to packages a project references
+         DIRECTLY. Transitive pinning makes every PackageVersion below also override the
+         version NuGet would otherwise resolve for the same package transitively - which is
+         what actually moves System.Security.Cryptography.Pkcs off 9.0.11 (see its entry). -->
+    <CentralPackageTransitivePinningEnabled>true</CentralPackageTransitivePinningEnabled>
   </PropertyGroup>
   <ItemGroup>
     <PackageVersion Include="AwesomeAssertions" Version="9.6.0" />
@@ -38,10 +43,15 @@
     <PackageVersion Include="Serilog.AspNetCore" Version="10.0.0" />
     <PackageVersion Include="Serilog.Enrichers.Span" Version="3.1.0" />
     <PackageVersion Include="Swashbuckle.AspNetCore.SwaggerUI" Version="10.3.1" />
-    <!-- transitive via Microsoft.Data.SqlClient; 9.0.11 has known moderate/high CVEs (NU1902/NU1903) -->
+    <!-- Transitive only (via Microsoft.Data.SqlClient, which declares version="9.0.11" - an
+         open-ended MINIMUM, not an exact range). 9.0.11 has known moderate/high CVEs
+         (NU1902/NU1903). Pinned here and enforced by CentralPackageTransitivePinningEnabled
+         above; verify with "dotnet list package" plus the include-transitive flag. -->
     <PackageVersion Include="System.Security.Cryptography.Pkcs" Version="10.0.14" />
     <PackageVersion Include="Testcontainers.MsSql" Version="4.16.0" />
+    <PackageVersion Include="Testcontainers.RabbitMq" Version="4.16.0" />
     <PackageVersion Include="WireMock.Net" Version="2.21.0" />
+    <PackageVersion Include="Xunit.SkippableFact" Version="1.5.23" />
     <PackageVersion Include="xunit" Version="2.9.3" />
     <PackageVersion Include="xunit.runner.visualstudio" Version="3.1.4" />
     <PackageVersion Include="Yarp.ReverseProxy" Version="2.3.0" />

@@ -32,6 +32,9 @@ kubectl -n icmarkets port-forward svc/icmarkets-api 8080:8080
 
 ## What's simplified vs. a production setup
 
+- **RabbitMQ has a PVC (`rabbitmq-data`) and a pinned node name** (`RABBITMQ_NODENAME`), because the
+  outbox marks a row processed once the broker has acked it - if the broker's store were replaced, acked
+  but unread messages would be lost. Like the rest of these manifests this is untested on a cluster.
 - **No PersistentVolumeClaim for SQL Server** — the Deployment is disposable, matching
   `docker-compose.yml`'s `db` service's role as a dev/demo instance, not production storage. A real
   deployment would use a StatefulSet + PVC.

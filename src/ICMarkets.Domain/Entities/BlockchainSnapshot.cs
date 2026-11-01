@@ -50,6 +50,29 @@ public class BlockchainSnapshot
         string rawJson,
         DateTimeOffset createdAt)
     {
+        // The entity guards its own invariants rather than trusting every caller: the external
+        // payload is validated in the adapter, but a snapshot of default values must be
+        // impossible to construct from any other path too.
+        ArgumentException.ThrowIfNullOrWhiteSpace(name);
+        ArgumentException.ThrowIfNullOrWhiteSpace(hash);
+        ArgumentException.ThrowIfNullOrWhiteSpace(rawJson);
+        ArgumentOutOfRangeException.ThrowIfNegative(height);
+        ArgumentOutOfRangeException.ThrowIfNegative(peerCount);
+        ArgumentOutOfRangeException.ThrowIfNegative(unconfirmedCount);
+        // a fork height is a block height - it cannot be negative (the fee/gas tiers guard
+        // themselves inside their value objects; this primitive lives directly on the entity).
+        if (lastForkHeight is { } forkHeight)
+            ArgumentOutOfRangeException.ThrowIfNegative(forkHeight);
+
+        // Exactly one pricing family, matched to the network: ETH is account-based (gas),
+        // every other chain is UTXO-based (fee-per-kb). The adapter checks the wire payload;
+        // the aggregate must be impossible to build inconsistent from any source.
+        var usesGas = network == Network.EthMain;
+        if (usesGas && (gasPrices is null || feeRates is not null))
+            throw new ArgumentException("An Ethereum snapshot must carry gas prices and no fee rates.", nameof(gasPrices));
+        if (!usesGas && (feeRates is null || gasPrices is not null))
+            throw new ArgumentException("A non-Ethereum snapshot must carry fee rates and no gas prices.", nameof(feeRates));
+
         var snapshot = new BlockchainSnapshot
         {
             Network = network,

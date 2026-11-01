@@ -1,6 +1,6 @@
 using System.Text.Json;
 using AwesomeAssertions;
-using ICMarkets.Application.Dtos;
+using ICMarkets.Infrastructure.BlockCypher;
 
 namespace ICMarkets.UnitTests.Dtos;
 

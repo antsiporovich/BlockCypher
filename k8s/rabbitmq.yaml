@@ -1,3 +1,14 @@
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: rabbitmq-data
+  namespace: icmarkets
+spec:
+  accessModes: ["ReadWriteOnce"]
+  resources:
+    requests:
+      storage: 1Gi
+---
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -5,6 +16,9 @@ metadata:
   namespace: icmarkets
 spec:
   replicas: 1
+  # one pod owns the ReadWriteOnce volume; never run old and new pods side by side.
+  strategy:
+    type: Recreate
   selector:
     matchLabels:
       app: rabbitmq
@@ -15,16 +29,30 @@ spec:
     spec:
       containers:
         - name: rabbitmq
-          image: rabbitmq:3-management
+          # same pinned version as docker-compose.yml (a data directory must not be
+          # opened by a different major version than the one that wrote it).
+          image: rabbitmq:4.2.7-management
+          env:
+            # the store directory is named after the node, and a Deployment's pod hostname
+            # changes on every restart - pin the node name so the volume is picked up again.
+            - name: RABBITMQ_NODENAME
+              value: rabbit@localhost
           ports:
             - containerPort: 5672
             - containerPort: 15672
+          volumeMounts:
+            - name: data
+              mountPath: /var/lib/rabbitmq
           readinessProbe:
             exec:
               command: ["rabbitmq-diagnostics", "-q", "ping"]
             initialDelaySeconds: 15
             periodSeconds: 10
             failureThreshold: 10
+      volumes:
+        - name: data
+          persistentVolumeClaim:
+            claimName: rabbitmq-data
 ---
 apiVersion: v1
 kind: Service

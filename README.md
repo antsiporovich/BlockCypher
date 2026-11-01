@@ -56,30 +56,30 @@ Clean Architecture layering with the dependency rule enforced one direction only
 Architecture, Vertical Slice and CQRS, and this hybrid demonstrates all three.
 
 ```
-┌─────────────────────────────────────────────────────────┐
-│  ICMarkets.Api                                           │
-│  controllers · OpenAPI/Swagger/Scalar · CORS · health    │
-│  · DI composition root · OpenTelemetry/Serilog wiring    │
+┌───────────────────────────────────────────────────────────┐
+│  ICMarkets.Api                                            │
+│  controllers · OpenAPI/Swagger/Scalar · CORS · health     │
+│  · DI composition root · OpenTelemetry/Serilog wiring     │
 └───────────────────────────┬───────────────────────────────┘
-                             ▼
-┌─────────────────────────────────────────────────────────┐
+                            ▼
+┌───────────────────────────────────────────────────────────┐
 │  ICMarkets.Infrastructure                                 │
 │  EF Core DbContext · repositories · BlockCypher HTTP      │
 │  client (resilience) · ingestion background worker        │
 └───────────────────────────┬───────────────────────────────┘
-                             ▼
-┌─────────────────────────────────────────────────────────┐
-│  ICMarkets.Application                                    │
+                            ▼
+┌────────────────────────────────────────────────────────────┐
+│  ICMarkets.Application                                     │
 │  CQRS commands/queries (feature folders: Ingestion,        │
 │  History, Networks) · DTOs · Mapperly mappers · validators │
-└───────────────────────────┬───────────────────────────────┘
-                             ▼
-┌─────────────────────────────────────────────────────────┐
+└───────────────────────────┬────────────────────────────────┘
+                            ▼
+┌────────────────────────────────────────────────────────────┐
 │  ICMarkets.Domain                                          │
-│  BlockchainSnapshot entity · Network enum · FeeRates /      │
-│  GasPrices value objects · SnapshotIngested domain event    │
-│  (no dependencies on any other layer)                       │
-└─────────────────────────────────────────────────────────┘
+│  BlockchainSnapshot entity · Network enum · FeeRates /     │
+│  GasPrices value objects · SnapshotIngested domain event   │
+│  (no dependencies on any other layer)                      │
+└────────────────────────────────────────────────────────────┘
 ```
 
 `Api → Infrastructure → Application → Domain`. Domain depends on nothing; Application never references
@@ -102,10 +102,11 @@ Infrastructure or Api.
 | Method | Route | Purpose |
 |---|---|---|
 | `POST` | `/api/v1/blockchains/ingest` | Fetch all 5 configured networks now and store a snapshot of each (per-network failure isolation — one chain failing never aborts the batch; check `failed` in the response). |
-| `GET` | `/api/v1/blockchains/{network}/history?take=50&skip=0` | Stored snapshots for one network, `CreatedAt` descending. |
+| `GET` | `/api/v1/blockchains/{network}/history?take=50&cursor=...` | Stored snapshots for one network, `CreatedAt` descending. Keyset (cursor) paginated: the response is `{ "items": [...], "nextCursor": "..."\|null }`; pass `nextCursor` back as `cursor` for the next page. A malformed `cursor` is a `400`. |
 | `GET` | `/api/v1/blockchains/{network}/latest` | Most recently stored snapshot for one network. `404` if nothing has been ingested yet. |
 | `GET` | `/api/v1/blockchains/networks` | The network keys this API accepts (`btc-main`, `eth-main`, `dash-main`, `btc-test3`, `ltc-main`). |
-| `GET` | `/health` | Liveness/readiness, including a DB connectivity check. |
+| `GET` | `/health` | Full health, including a DB connectivity check. |
+| `GET` | `/health/live`, `/health/ready` | Kubernetes probes: liveness never touches the DB (a DB outage must not restart a healthy API); readiness includes the DB check. |
 | `GET` | `/metrics` | Prometheus scrape endpoint (ingestion counters, fetch-duration histogram). |
 
 A background worker also calls the same ingestion pipeline on a timer (`Ingestion:IntervalSeconds` in
@@ -123,10 +124,30 @@ ingested response:
   value objects — exactly one of the two is populated per network family.
 - `RawJson` — the complete BlockCypher response, stored as provided, so nothing captured by the typed
   columns is ever lost.
-- `CreatedAt` (`DateTimeOffset`, UTC) — set from an injected `TimeProvider` at the moment the fetch
-  completes, **not** `DateTime.UtcNow` (keeps it deterministic and testable). History is always
+- `RawJson` is only stored for a **valid** response: an HTTP 200 whose body is empty (`{}`), an error
+  object, another network's data (wrong name, wrong fee/gas family, missing `time`), or physically
+  impossible values (negative fees, gas prices or fork height) is rejected in `BlockCypherClient` and
+  reported in `failed`, never persisted as a snapshot of default values. The non-negativity invariant is
+  also enforced in the domain — `FeeRates`/`GasPrices` and `BlockchainSnapshot.Create` reject negative
+  values — so a bad snapshot is unrepresentable from any path, not just the ingestion adapter.
+- `CreatedAt` (`DateTimeOffset`, UTC) — the **request** time: stamped by the ingestion producer from an
+  injected `TimeProvider` just *before* it calls BlockCypher and carried through the channel
+  as `RequestedAt`. It is deliberately **not** the response-receipt time (that varies with latency,
+  rate-limit queueing and retries) and **not** read when the row is persisted — under backpressure a
+  fetched response can wait in the queue, and the history should show when the data was asked for, not
+  when it was written. Not `DateTime.UtcNow`, so it stays deterministic and testable. History is always
   returned ordered `CreatedAt DESC`, with `Id DESC` as a tiebreaker for same-timestamp rows, backed by
   a composite `(Network, CreatedAt DESC)` index.
+
+### History pagination (keyset, not offset)
+
+`/history` uses **keyset (cursor) pagination** over `(CreatedAt DESC, Id DESC)`, not OFFSET. Each page
+returns an opaque `nextCursor` (the `(CreatedAt, Id)` of its last row, base64url-encoded); pass it back
+as `cursor` to get the next page. Because the next page selects rows strictly *after* that cursor, a
+snapshot ingested between two page requests — the background worker does this on every tick — can
+neither shift a page nor be duplicated across pages, which OFFSET (`skip`) cannot guarantee. The cursor
+is opaque and only ever trusted as far as it parses: a malformed or forged token is a `400`, never a
+silent first page. The same `(Network, CreatedAt DESC)` index serves the keyset predicate and order.
 
 ## Testing
 
@@ -141,17 +162,20 @@ dotnet run -c Release --project tests/ICMarkets.PerformanceTests       # Benchma
 ```
 
 - **Unit** (`tests/ICMarkets.UnitTests`) — command/query handlers, validators, the Mapperly mapper and
-  BlockCypher JSON deserialization, with NSubstitute doubles for `IBlockCypherClient`/`ISender`.
+  BlockCypher JSON deserialization, with NSubstitute doubles for `IChainInfoSource`/`ISender` and a hand-written fake `IUnitOfWorkFactory`.
 - **Integration** (`tests/ICMarkets.IntegrationTests`) — the repository and EF Core migrations against a
-  **real SQL Server** container via Testcontainers.MsSql (one shared container per test assembly, skips
-  gracefully if Docker isn't available). Testing only on SQLite would hide real SQL Server behaviour
+  **real SQL Server** container via Testcontainers.MsSql (one shared container per test assembly). Without
+  Docker the SQL Server tests are reported as **Skipped** with a reason, never as Passed; in CI
+  `REQUIRE_SQLSERVER=1` turns an unavailable container into a failure instead. Testing only on SQLite would hide real SQL Server behaviour
   (identity columns, `DateTime2` precision, collation, index usage).
 - **Functional** (`tests/ICMarkets.FunctionalTests`) — full HTTP pipeline via `WebApplicationFactory`,
   SQLite in-memory for speed, and **WireMock.Net** stubbing BlockCypher so the suite is fast,
   deterministic, offline, and never hits the live API's rate limits.
 - **Performance** (`tests/ICMarkets.PerformanceTests`) — BenchmarkDotNet micro-benchmarks on the mapping
   and query-handler paths. Deliberately outside the `.slnx` and `dotnet test`/CI — it's a profiling
-  tool, not a pass/fail gate; run it manually with `dotnet run -c Release`.
+  tool, not a pass/fail gate; run it manually with `dotnet run -c Release`. These are
+  microbenchmarks of in-process code (mapping, handlers over a stubbed repository); they say nothing
+  about end-to-end throughput, which would be dominated by BlockCypher latency and the database.
 - `TimeProvider` is injected everywhere `CreatedAt` is set, so ordering assertions are deterministic
   instead of racing the system clock.
 
@@ -165,8 +189,11 @@ variables (`Database__Provider`, etc. — the compose file shows this).
 | `Database:Provider` | `SqlServer` \| `Sqlite` | Picks the EF Core provider. `Sqlite` needs no Docker; `SqlServer` is what `docker-compose.yml` uses. |
 | `ConnectionStrings:Default` | connection string | For the selected provider. |
 | `BlockCypher:BaseUrl` | URL | BlockCypher API root. |
+| `BlockCypher:FetchTimeoutSeconds` | int, default 45 | Hard budget for one network fetch (headers + body, retries included). A stalled response body counts as that network failing, never as a cancelled batch or a stopped host. |
+| `BlockCypher:RequestsPerSecond` | int, default 3 | Process-wide cap on real HTTP attempts to BlockCypher (retries included), shared by every caller. Excess requests wait in a queue. |
 | `BlockCypher:Token` | string, optional | Free BlockCypher token to raise the anonymous rate limit. Empty = anonymous access. |
 | `Ingestion:Enabled` / `Ingestion:IntervalSeconds` | bool / int | Background ingestion worker on/off and poll interval (default 300s — deliberately modest to respect BlockCypher's rate limits). |
+| `ForwardedHeaders:Enabled` / `KnownNetworks` / `KnownProxies` | bool / string[] / string[] | Honor `X-Forwarded-*` from a gateway. Off by default; when on, honored **only** from the listed CIDR networks / proxy IPs (empty lists = loopback only). `docker-compose.yml` lists the compose network. Never trust all senders: a direct caller could spoof client address, scheme and host. |
 | `Cors:AllowedOrigins` | string array | Empty = allow any origin (no browser client for this assessment); set to lock down the CORS policy for a real deployment. |
 | `OpenTelemetry:OtlpEndpoint` | URL, optional | Where to export OTel traces via OTLP. Empty = traces still run through the pipeline, just nothing is exported over the network. |
 
@@ -190,8 +217,22 @@ variables (`Database__Provider`, etc. — the compose file shows this).
   is I/O-bound, not CPU-bound, so PLINQ (built for CPU-bound partitioning) is the wrong tool. Ingestion
   uses a bounded `System.Threading.Channels` producer/consumer with `Parallel.ForEachAsync` and an
   explicit `MaxDegreeOfParallelism`, so concurrency is deliberately bounded rather than an unbounded
-  fan-out that would trip BlockCypher's rate limiter. Each parallel branch gets its own DI scope
-  (`IServiceScopeFactory`) because `DbContext` isn't thread-safe, and one network failing never aborts
+  fan-out that would trip BlockCypher's rate limiter. That cap bounds ONE batch only - it is a
+  concurrency limit, not a rate limit. The rate guarantee comes from a process-wide, time-based
+  minimum-interval gate (`BlockCypher:RequestsPerSecond`, default 3): consecutive requests are at least
+  1/N s (~334 ms) apart, so at most N leave in ANY one-second window - a strict limit, no burst (a token
+  bucket only bounds the average and can release two requests milliseconds apart). It sits in the HTTP pipeline, placed
+  inside the retry strategy so every real attempt, retries included, takes a permit; all `POST /ingest`
+  calls and the background worker share it, and callers over the budget queue instead of failing.
+  The response body is buffered inside that same pipeline (a small handler between the retry strategy and
+  the limiter), so a connection that drops mid-body after `200 OK` is a normal retryable failure of the one
+  existing policy - the network recovers on the next attempt instead of failing - while a body that merely
+  stalls still hits the fetch budget and fails only that network.
+  Limits worth stating plainly: it is per process (several replicas would need a distributed limiter,
+  e.g. Redis), and a per-second limit does not enforce BlockCypher's separate hourly quota - that is
+  what the optional token and the 300s worker interval are for. Each persisted item gets its own unit of work
+  (a fresh `DbContext`, via the `IUnitOfWorkFactory` port - Application never touches the DI container)
+  because a failed `SaveChanges` poisons the context, and one network failing never aborts
   the others.
 - **Dependency licensing.** Several .NET staples went commercial in 2025–2026; ICMarkets is well above
   any plausible free-tier revenue threshold, so the licence terms matter in practice, not just in
@@ -208,9 +249,32 @@ variables (`Database__Provider`, etc. — the compose file shows this).
   Enforced mechanically: every version lives in `Directory.Packages.props` (Central Package Management),
   so a stray `dotnet add` can't silently drift onto a commercial version.
 - **The API serves stored history, not a live BlockCypher proxy.** This is the task's own requirement —
-  `CreatedAt` is set once, at fetch time, and every read endpoint queries the database, never BlockCypher
+  `CreatedAt` is set once, at request time, and every read endpoint queries the database, never BlockCypher
   directly. This is also what makes the functional tests fast, deterministic and independent of
   BlockCypher's availability or rate limits (WireMock stands in for BlockCypher there).
+- **Messaging: at-least-once, not exactly-once.** `SnapshotIngested` is written to an outbox table in the
+  same transaction as the snapshot, then drained to RabbitMQ by `OutboxPublisherWorker`. The delivery
+  contract, and what enforces it:
+  - A row is marked processed only after the broker has **confirmed** the message — the channel uses
+    publisher confirms with tracking, so `BasicPublishAsync` completes on the broker's ack, not when bytes
+    reach the socket — and a nack throws.
+  - Publishes are `mandatory` against a fanout exchange: a message no queue can receive is returned by the
+    broker and surfaces as an exception, so the row stays unprocessed instead of being "delivered" into
+    nothing. For the demo a durable, TTL/length-bounded queue is declared and bound
+    (`Outbox:Queue`, empty = declare nothing and let real consumers bind their own).
+  - Messages are `Persistent` (with a durable queue they survive a broker restart) and carry
+    `MessageId` = the outbox row id, stable across retries.
+  - Each publish has its own time budget (`Outbox:PublishTimeoutSeconds`, default 10): RabbitMQ.Client
+    waits for a confirm with no timeout, so without it a broker that stays connected but stops
+    confirming would stall the queue indefinitely. When the budget runs out the attempt is abandoned,
+    the channel is recreated (its confirm state is undefined after a cancelled publish) and the next
+    tick retries; a late confirm for the abandoned attempt is one more reason consumers de-duplicate.
+  - Broker down, nack or unroutable → the row stays unprocessed and is retried on the next tick. Each row
+    is saved as soon as it is confirmed, so a failure later in a batch does not re-publish confirmed rows.
+  - The remaining duplicate window — a crash between the broker's ack and saving `ProcessedAt` — is
+    closed on the consumer side: **consumers must be idempotent on `MessageId`.** No exactly-once claim.
+  - Staging a row is idempotent within a unit of work: a failed-then-retried `SaveChanges` does not
+    produce two outbox rows for one snapshot.
 
 ## Requirement coverage
 
@@ -220,9 +284,9 @@ Kubernetes — to where it lives in this codebase, rather than leaving it implic
 
 | Requirement | Where it lives here |
 |---|---|
-| Multithreading, concurrency, thread safety, fault tolerance | Bounded `System.Threading.Channels` + `Parallel.ForEachAsync` ingestion pipeline, per-branch DI scopes, per-network failure isolation — see "Design decisions & trade-offs" above and ADR 0004. |
+| Multithreading, concurrency, thread safety, fault tolerance | Bounded `System.Threading.Channels` + `Parallel.ForEachAsync` ingestion pipeline, a fresh unit of work per persisted item (`IUnitOfWorkFactory` port), per-network failure isolation — see "Design decisions & trade-offs" above and ADR 0004. |
 | Clean Architecture + Vertical Slice + CQRS | Four-layer Clean Architecture with feature folders (`Application/Features/{Ingestion,History,Networks}`) inside it; CQRS via MediatR. See "Architecture" and "Design patterns used" above. |
-| Domain-driven | `BlockchainSnapshot` as a rich entity with a static factory, `FeeRates`/`GasPrices` value objects, a `SnapshotIngested` domain event — deliberately scoped short of full tactical DDD, which five snapshot tables don't justify. |
+| Domain-driven | `BlockchainSnapshot` as an entity whose static factory enforces its own invariants (non-empty name/hash/raw payload, non-negative height and counts), `FeeRates`/`GasPrices` value objects, a `SnapshotIngested` domain event — deliberately scoped short of full tactical DDD, which five snapshot tables don't justify. |
 | Event-driven design (Kafka/AWS SQS/RabbitMQ) | Transactional outbox + **RabbitMQ** publisher on `SnapshotIngested` (`Infrastructure/Messaging/`), off by default, on in `docker-compose.yml`. A fanout exchange means a Kafka or SQS consumer could subscribe without this publisher changing; swapping the exchange for a Kafka topic is a new `IEventPublisher` implementation, not a redesign. |
 | Saga pattern for distributed transactions | Not implemented — this service has one aggregate and no cross-service transaction to coordinate. Noted here as the natural next step if ingestion and persistence ever split into separate services. |
 | OpenTelemetry, Prometheus, Grafana, Elastic/Kibana | Full OTel traces/metrics/logs, `/metrics` scraped by Prometheus, a provisioned Grafana dashboard in `docker-compose.yml`, and Elastic Common Schema-formatted console logs (Kibana-ingestible without standing up a full ELK stack). |
@@ -255,8 +319,12 @@ this became, while every route currently lives on one.
   need a second environment switch just to see the API docs; a real deployment would gate
   `MapOpenApi`/`MapScalarApiReference`/`UseSwaggerUI` behind `app.Environment.IsDevelopment()` or a
   feature flag.
+- **Read path loads `RawJson`** — `GetHistory`/`GetLatest` materialize the full entity, including the
+  large `RawJson` audit column, and the mapper then drops it. A server-side projection straight to the DTO
+  would avoid that; negligible at this row size, so it is noted rather than done.
 - **Outbox retention** — `OutboxPublisherWorker` purges processed rows older than
   `Outbox:RetentionHours` (default 24h) on every tick, and the table is never written to at all while
-  `Outbox:Enabled` is false (the default local/SQLite path), so it stays bounded in both modes.
+  `Outbox:Enabled` is false (the default local/SQLite path), so it stays bounded in both modes. The purge
+  runs on SQLite too (`ProcessedAt` is stored as UTC ticks there so the comparison translates).
 
 See `docs/adr/` for the fuller reasoning behind the choices above.

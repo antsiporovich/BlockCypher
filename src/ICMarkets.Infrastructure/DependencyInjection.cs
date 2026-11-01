@@ -30,32 +30,56 @@ public static class DependencyInjection
         // AppDbContext already implements IUnitOfWork - expose it as that
         // interface too, resolving to the same scoped instance (same DbContext).
         services.AddScoped<IUnitOfWork>(sp => sp.GetRequiredService<AppDbContext>());
+        // Application asks for a fresh unit of work per ingested item; the scope/DbContext
+        // lifetime behind it is built here.
+        services.AddSingleton<IUnitOfWorkFactory, IngestionUnitOfWorkFactory>();
 
-        services.Configure<BlockCypherOptions>(config.GetSection(BlockCypherOptions.SectionName));
-        services.AddHttpClient<IBlockCypherClient, BlockCypherClient>((sp, c) =>
+        // Options are validated at startup (ValidateOnStart): invalid config fails fast with a
+        // clear message instead of surfacing at first use. See OptionsValidators.cs.
+        services.AddSingleton<IValidateOptions<BlockCypherOptions>, BlockCypherOptionsValidator>();
+        services.AddOptions<BlockCypherOptions>()
+            .Bind(config.GetSection(BlockCypherOptions.SectionName))
+            .ValidateOnStart();
+        services.AddSingleton<BlockCypherRateLimiter>();
+        var blockCypherClient = services.AddHttpClient<IChainInfoSource, BlockCypherClient>((sp, c) =>
             {
                 var opts = sp.GetRequiredService<IOptions<BlockCypherOptions>>().Value;
                 c.BaseAddress = new Uri(opts.BaseUrl);
+                // Timeouts are owned by the resilience pipeline and BlockCypherClient's
+                // fetch budget. The built-in HttpClient.Timeout throws a
+                // TaskCanceledException that looks exactly like caller cancellation.
+                c.Timeout = Timeout.InfiniteTimeSpan;
                 c.DefaultRequestHeaders.UserAgent.ParseAdd("ICMarkets-BlockCypher-Assessment/1.0");
-            })
+            });
+
+        // Pipeline order is registration order, outermost first:
+        //   resilience (total timeout -> retry -> breaker -> attempt timeout)
+        //   -> body buffering -> rate limiter -> network.
+        // Buffering reads the body inside the retry, so a mid-body transport drop is a normal
+        // retryable failure of the one existing policy. The limiter sits inside both, so every
+        // real attempt (headers + body), including each retry, takes one permit.
+        blockCypherClient
             .AddStandardResilienceHandler(resilience =>
             {
-                // The standard handler's default predicate already treats 429,
-                // 5xx and timeouts as transient and retries them with jittered
-                // exponential backoff. The one thing it doesn't do by default is
-                // honor a Retry-After header, so wire that in explicitly -
-                // falls back to the computed backoff when the header is absent.
+                // The standard handler's default predicate already treats 429, 5xx,
+                // HttpRequestException and timeouts as transient and retries them with
+                // jittered exponential backoff - and HttpRetryStrategyOptions.ShouldRetryAfterHeader
+                // is true by default, so a Retry-After header (BOTH delta-seconds and HTTP-date
+                // forms) already sets the retry delay. Deliberately NO custom
+                // DelayGenerator: a hand-rolled one that read only Retry-After.Delta
+                // silently ignored the date form and retried too early.
                 resilience.Retry.MaxRetryAttempts = 3;
                 resilience.Retry.BackoffType = DelayBackoffType.Exponential;
                 resilience.Retry.UseJitter = true;
-                resilience.Retry.DelayGenerator = args =>
-                {
-                    var retryAfter = args.Outcome.Result?.Headers.RetryAfter?.Delta;
-                    return ValueTask.FromResult(retryAfter);
-                };
             });
+        blockCypherClient.AddHttpMessageHandler(() => new ResponseBufferingHandler());
+        blockCypherClient.AddHttpMessageHandler(sp =>
+            new RateLimitingHandler(sp.GetRequiredService<BlockCypherRateLimiter>()));
 
-        services.Configure<IngestionOptions>(config.GetSection(IngestionOptions.SectionName));
+        services.AddSingleton<IValidateOptions<IngestionOptions>, IngestionOptionsValidator>();
+        services.AddOptions<IngestionOptions>()
+            .Bind(config.GetSection(IngestionOptions.SectionName))
+            .ValidateOnStart();
         services.AddHostedService<ChainIngestionWorker>();
 
         // Event-driven outbound edge: SnapshotIngested events are written to
@@ -63,7 +87,10 @@ public static class DependencyInjection
         // drained to RabbitMQ by OutboxPublisherWorker, which no-ops when
         // Outbox:Enabled is false - no RabbitMQ required for local/SQLite
         // dev or the functional tests.
-        services.Configure<OutboxOptions>(config.GetSection(OutboxOptions.SectionName));
+        services.AddSingleton<IValidateOptions<OutboxOptions>, OutboxOptionsValidator>();
+        services.AddOptions<OutboxOptions>()
+            .Bind(config.GetSection(OutboxOptions.SectionName))
+            .ValidateOnStart();
         services.AddSingleton<IEventPublisher, RabbitMqEventPublisher>();
         services.AddHostedService<OutboxPublisherWorker>();
 

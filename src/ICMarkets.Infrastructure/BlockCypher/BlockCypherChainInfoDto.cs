@@ -1,7 +1,9 @@
 using System.Text.Json.Serialization;
 
-namespace ICMarkets.Application.Dtos;
+namespace ICMarkets.Infrastructure.BlockCypher;
 
+// BlockCypher's wire contract - an adapter detail, so it lives here and never crosses
+// into Application (which only sees the neutral ChainInfo).
 // superset DTO: fee-per-kb family (BTC/LTC/Dash) + gas-price family (ETH),
 // both nullable. ETH's base_fee/*_priority_fee confirmed present on live
 // responses during Phase 0 recon.

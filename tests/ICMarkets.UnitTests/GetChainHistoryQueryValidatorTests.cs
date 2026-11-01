@@ -28,18 +28,30 @@ public sealed class GetChainHistoryQueryValidatorTests
     }
 
     [Fact]
-    public void Validate_NegativeSkip_HasError()
+    public void Validate_MalformedCursor_HasError()
     {
-        var result = _validator.Validate(new GetChainHistoryQuery("btc-main", Skip: -1));
+        // a cursor that doesn't decode is a 400, never a silent "first page"
+        var result = _validator.Validate(new GetChainHistoryQuery("btc-main", Cursor: "not-a-valid-cursor"));
 
         result.IsValid.Should().BeFalse();
-        result.Errors.Should().ContainSingle(e => e.PropertyName == "Skip");
+        result.Errors.Should().ContainSingle(e => e.PropertyName == "Cursor");
     }
 
     [Fact]
-    public void Validate_KnownNetworkAndInRangeParameters_IsValid()
+    public void Validate_NullCursor_IsValid()
     {
-        var result = _validator.Validate(new GetChainHistoryQuery("btc-main", Take: 50, Skip: 0));
+        // the first page has no cursor - absence must not be treated as a malformed token
+        var result = _validator.Validate(new GetChainHistoryQuery("btc-main", Take: 50, Cursor: null));
+
+        result.IsValid.Should().BeTrue();
+    }
+
+    [Fact]
+    public void Validate_WellFormedCursor_IsValid()
+    {
+        var cursor = new HistoryCursor(DateTimeOffset.UtcNow, 7).Encode();
+
+        var result = _validator.Validate(new GetChainHistoryQuery("btc-main", Take: 50, Cursor: cursor));
 
         result.IsValid.Should().BeTrue();
     }
